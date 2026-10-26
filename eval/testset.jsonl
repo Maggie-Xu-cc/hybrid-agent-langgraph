@@ -1,0 +1,24 @@
+{"q": "你好", "difficulty": "easy", "category": "寒暄"}
+{"q": "谢谢！", "difficulty": "easy", "category": "寒暄"}
+{"q": "你是谁？", "difficulty": "easy", "category": "寒暄"}
+{"q": "把「今天天气不错」翻译成英文", "difficulty": "easy", "category": "翻译"}
+{"q": "把「我明天下午三点开会」翻译成日文", "difficulty": "easy", "category": "翻译"}
+{"q": "1 公里等于多少米", "difficulty": "easy", "category": "事实"}
+{"q": "什么是 REST API？", "difficulty": "easy", "category": "概念"}
+{"q": "HTTP 状态码 404 是什么意思", "difficulty": "easy", "category": "概念"}
+{"q": "把这段话改成更正式的语气：明天我不来了", "difficulty": "easy", "category": "改写"}
+{"q": "帮我把下面这行改成全大写：hello world", "difficulty": "easy", "category": "格式转换"}
+{"q": "解释一下快速排序的平均时间复杂度和最坏情况", "difficulty": "hard", "category": "算法"}
+{"q": "用 Python 写一个带超时控制的进程池，并解释为什么用 deque 而不是 list 做任务队列", "difficulty": "hard", "category": "写代码"}
+{"q": "这段代码报错了：TypeError: 'NoneType' object is not subscriptable，帮我定位原因", "difficulty": "hard", "category": "调试"}
+{"q": "设计一个支持 10 万长连接的消息推送系统，说明分层与瓶颈", "difficulty": "hard", "category": "系统设计"}
+{"q": "证明：任意连通无向图至少有两个顶点不是割点", "difficulty": "hard", "category": "数学"}
+{"q": "推导 Transformer 中缩放点积注意力的梯度形式，并说明为什么除以根号 d", "difficulty": "hard", "category": "深度学习"}
+{"q": "分析一下 8GB 显存跑 14B 模型 4bit 量化时的显存占用，并给出优化方案", "difficulty": "hard", "category": "工程分析"}
+{"q": "对比 vLLM 与 Ollama 在吞吐和显存管理上的设计差异，给出选型建议", "difficulty": "hard", "category": "技术选型"}
+{"q": "把下面这段一万字的课程笔记压缩成 800 字摘要，保留所有公式与结论，并标注原文中的矛盾之处。以下是正文：机器学习是人工智能的一个重要分支，它研究如何让计算机从数据中自动学习规律。监督学习依赖带标签的数据，无监督学习则从无标签数据中发现结构。深度学习通过多层非线性变换来拟合复杂函数。在训练过程中，我们通常最小化经验风险，并用正则化控制过拟合。梯度下降是最基础的优化方法，其变体包括动量法、RMSProp 和 Adam。学习率的选择对收敛影响很大，太大的学习率会导致震荡甚至发散，太小则收敛缓慢。批量大小会影响梯度估计的方差，进而影响泛化性能。近年来，预训练加微调的范式成为主流，大规模语料上的自监督学习显著提升了模型的通用能力。与此同时，模型规模的增长带来了算力与能耗的挑战，如何在有限资源下高效训练与推理成为研究热点。量化、剪枝、蒸馏是三条主要的压缩路线。量化把浮点权重映射到低比特整数，剪枝移除冗余连接，蒸馏让小模型模仿大模型的行为。在部署侧，推理引擎通过批处理、KV 缓存复用和算子融合来提升吞吐。评估一个大模型需要兼顾能力、鲁棒性、安全性和效率，单一指标往往会掩盖问题。数据质量的重要性常被低估，清洗与配比直接决定了模型的最终上限。以上是本文的主要脉络，请在此基础上完成压缩任务。", "difficulty": "hard", "category": "长文处理"}
+{"q": "如果我把 batch size 从 8 调到 64，学习率应该怎么调整？请结合线性缩放规则与 warmup 说明理由", "difficulty": "hard", "category": "训练调参"}
+{"q": "帮我 review 这段 SQL：select * from orders where created_at > '2024-01-01' and status != 'cancelled'，在大表上很慢", "difficulty": "hard", "category": "数据库"}
+{"q": "什么是 CAP 定理", "difficulty": "easy", "category": "概念"}
+{"q": "把 3 点 15 分转换成 24 小时制的数字写法", "difficulty": "easy", "category": "格式转换"}
+{"q": "用一句话说明 TCP 和 UDP 的主要区别", "difficulty": "easy", "category": "概念"}

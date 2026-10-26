@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.env
+*.db
+runs.db
+eval/eval_runs.db
+checkpoints.db
+# SQLite WAL 模式会额外生成这两个文件（不忽略会一直出现在 git status 里）
+*.db-wal
+*.db-shm
+*.tgz
+.venv*/
+.idea/
+.DS_Store
+
+# 说明：docs/evidence/ 和 eval/result.csv 故意不忽略——
+# 它们是"真的在云端跑过"的证据，要跟着仓库一起公开给老师看。

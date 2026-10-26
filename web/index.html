@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>混合推理 Agent Demo</title>
+<style>
+  :root {
+    --bg: #faf9f6;
+    --card: #ffffff;
+    --line: #e6e3dc;
+    --text: #22221f;
+    --muted: #7c7a73;
+    --easy: #0f6e56;
+    --easy-bg: #e1f5ee;
+    --hard: #854f0b;
+    --hard-bg: #faeeda;
+    --accent: #534ab7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.65; padding: 32px 20px 64px;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px;
+  }
+  textarea {
+    width: 100%; min-height: 84px; resize: vertical; font: inherit;
+    padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: #fdfcfa; color: var(--text); outline: none;
+  }
+  textarea:focus { border-color: #c9c4f0; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+    padding: 6px 14px;
+  }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    padding: 8px 20px; font-weight: 500;
+  }
+  button.ghost { font-size: 12px; padding: 4px 10px; color: var(--muted); }
+  button.ghost.danger { color: #a32d2d; border-color: #a32d2d; }
+  button:disabled { opacity: .5; cursor: default; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .badge {
+    display: inline-block; font-size: 12px; padding: 2px 9px;
+    border-radius: 999px; font-weight: 500;
+  }
+  .badge.easy { background: var(--easy-bg); color: var(--easy); }
+  .badge.hard { background: var(--hard-bg); color: var(--hard); }
+  .meta { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 10px 0 14px; }
+  .meta b { color: var(--text); font-weight: 500; }
+  .answer { white-space: pre-wrap; font-size: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat .k { font-size: 11px; color: var(--muted); }
+  .stat .v { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .hidden { display: none; }
+  .err { color: #a32d2d; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+
+  .sess-list { display: flex; flex-direction: column; gap: 6px; }
+  .sess {
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+    cursor: pointer; font-size: 12px; transition: border-color .15s, background .15s;
+  }
+  .sess:hover { border-color: #9aa4b2; }
+  .sess.active { border-color: #2563eb; background: rgba(37, 99, 235, .07); }
+  .sess .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess .m { color: var(--muted); white-space: nowrap; font-size: 11px; }
+  .sess .del {
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    font-size: 13px; line-height: 1; padding: 2px 6px; border-radius: 6px; cursor: pointer;
+  }
+  .sess .del:hover { color: #a32d2d; border-color: #a32d2d; }
+  .sess .del.armed { color: #a32d2d; border-color: #a32d2d; font-size: 11px; }
+  .transcript { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+  .msg { font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .msg b { display: block; font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 2px; }
+  .msg.user b { color: #2563eb; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>混合推理 Agent · 路由演示</h1>
+  <div class="sub">简单请求走本地小模型，复杂请求升级到云端大模型。每一笔 Token 与成本都会被记录。</div>
+
+  <div class="card">
+    <textarea id="q" placeholder="输入一个问题，例如：把「今天天气不错」翻译成英文"></textarea>
+    <div class="chips">
+      <button class="ghost" data-q="你好，你是谁？">闲聊</button>
+      <button class="ghost" data-q="把「会议推迟到周四下午三点」翻译成英文">翻译</button>
+      <button class="ghost" data-q="用 Python 写一个带超时控制的进程池，并解释为什么用 deque 而不是 list 做任务队列">写代码</button>
+      <button class="ghost" data-q="分析一下 8GB 显存跑 14B 模型 4bit 量化时的显存占用，并给出优化方案">长推理</button>
+    </div>
+    <div class="row">
+      <button class="primary" id="send">发送</button>
+      <button id="new-session" class="ghost">新会话</button>
+      <button id="clear" class="ghost">清空统计</button>
+      <span id="hint" class="sub" style="margin:0"></span>
+    </div>
+    <div class="sub" style="margin:8px 0 0">当前会话 <b id="sid"></b> · 同一会话内的多轮请求共享上下文</div>
+  </div>
+
+  <div class="card" id="sessions-card" style="margin-top:14px">
+    <div class="row" style="margin:0 0 8px">
+      <div class="sub" style="margin:0; flex:1">历史会话 <span id="sess-count"></span> · 点一条可以切回去接着聊</div>
+      <button id="clear-sessions" class="ghost">清空全部会话</button>
+    </div>
+    <div id="sessions" class="sess-list"><div class="sub" style="margin:0">加载中…</div></div>
+  </div>
+
+  <div class="card hidden" id="transcript-card" style="margin-top:14px">
+    <div class="sub" style="margin:0 0 8px">会话记录</div>
+    <div id="transcript" class="transcript"></div>
+  </div>
+
+  <div class="card hidden" id="result" style="margin-top:14px">
+    <div><span id="badge" class="badge"></span> <span id="reason" class="sub" style="margin:0"></span></div>
+    <div class="meta">
+      <span>决策依据 <b id="by"></b></span>
+      <span>耗时 <b id="lat"></b></span>
+      <span>成本 <b id="cost"></b></span>
+      <span>全云端 <b id="base"></b></span>
+      <span>节省 <b id="saved"></b></span>
+      <span>引擎 <b id="engine"></b></span>
+    </div>
+    <div class="answer" id="answer"></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">请求数</div><div class="v" id="s-runs">0</div></div>
+    <div class="stat"><div class="k">累计成本</div><div class="v" id="s-cost">¥0</div></div>
+    <div class="stat"><div class="k">较全云端节省</div><div class="v" id="s-save">0%</div></div>
+    <div class="stat"><div class="k">平均延迟</div><div class="v" id="s-lat">0ms</div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="sub" style="margin:0 0 4px">最近请求</div>
+    <table>
+      <thead><tr><th>时间</th><th>问题</th><th>路由</th><th>耗时</th><th>成本</th></tr></thead>
+      <tbody id="recent"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n, d = 4) => Number(n).toFixed(d);
+
+// 预览面板里看不到控制台，脚本一报错就"点了没反应"。把错误显示在页面上。
+window.addEventListener('error', (e) => {
+  const h = document.getElementById('hint');
+  if (h) h.textContent = '页面脚本错误：' + (e.message || e.error);
+});
+
+// 会话 id：同一浏览器复用同一个 id（刷新后还能接着聊），点"新会话"才换。
+// 后端用它当 checkpointer 的 thread_id，同 id 的请求共享多轮上下文。
+const SID_KEY = 'hybrid_agent_sid';
+function newSid() {
+  const raw = (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : String(Date.now()) + Math.random().toString(16).slice(2);
+  return raw.replace(/-/g, '').slice(0, 12);
+}
+let sessionId = localStorage.getItem(SID_KEY) || newSid();
+localStorage.setItem(SID_KEY, sessionId);
+function renderSid() { $('sid').textContent = sessionId; }
+
+// ---------------- 会话列表 / 历史回显 ----------------
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;');
+
+async function loadSessions() {
+  try {
+    const r = await fetch('/api/sessions');
+    const d = await r.json();
+    const list = d.sessions || [];
+    $('sess-count').textContent = list.length ? `(${list.length})` : '';
+    if (!list.length) {
+      $('sessions').innerHTML = '<div class="sub" style="margin:0">' +
+        (d.note || '还没有历史会话，先聊几句吧') + '</div>';
+      return;
+    }
+    $('sessions').innerHTML = list.map((s) => `
+      <div class="sess ${s.session_id === sessionId ? 'active' : ''}" data-sid="${esc(s.session_id)}">
+        <span class="t">${esc(s.title)}</span>
+        <span class="m">${s.turns} 轮 · ${esc(s.updated_at)}</span>
+        <button class="del" data-del="${esc(s.session_id)}" title="删除这个会话">×</button>
+      </div>`).join('');
+    $('sessions').querySelectorAll('.sess').forEach((el) => {
+      el.onclick = () => switchSession(el.dataset.sid);
+    });
+    $('sessions').querySelectorAll('.del').forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); armDelete(btn.dataset.del, btn); };
+    });
+  } catch (e) {
+    $('sessions').innerHTML = '<div class="sub" style="margin:0">会话列表加载失败：' + esc(e) + '</div>';
+  }
+}
+
+async function switchSession(sid) {
+  if (!sid) return;
+  sessionId = sid;
+  localStorage.setItem(SID_KEY, sid);
+  renderSid();
+  await loadTranscript();
+  loadSessions();
+  $('hint').textContent = '已切换到这个会话，可以接着聊';
+  setTimeout(() => { if ($('hint').textContent.startsWith('已切换到')) $('hint').textContent = ''; }, 2500);
+}
+
+async function loadTranscript() {
+  try {
+    const r = await fetch('/api/sessions/' + encodeURIComponent(sessionId));
+    const d = await r.json();
+    renderTranscript(d.messages || []);
+  } catch (e) {
+    renderTranscript([]);
+  }
+}
+
+function renderTranscript(messages) {
+  const card = $('transcript-card');
+  if (!messages.length) { card.classList.add('hidden'); $('transcript').innerHTML = ''; return; }
+  card.classList.remove('hidden');
+  $('transcript').innerHTML = messages.map((m) => `
+    <div class="msg ${m.role === 'user' ? 'user' : 'ai'}">
+      <b>${m.role === 'user' ? '我' : 'AI'}</b>${esc(m.content)}
+    </div>`).join('');
+  $('transcript').scrollTop = $('transcript').scrollHeight;
+}
+
+// ---------------- 删除会话 ----------------
+// 同样是页面内二次确认（嵌入式预览里 confirm 弹窗会被拦掉）
+let armedDelete = null;
+let armedTimer = null;
+
+function disarmDelete(btn) {
+  armedDelete = null;
+  if (btn) { btn.textContent = '×'; btn.classList.remove('armed'); }
+}
+
+async function armDelete(sid, btn) {
+  if (armedDelete !== sid) {
+    armedDelete = sid;
+    btn.textContent = '确认删除';
+    btn.classList.add('armed');
+    clearTimeout(armedTimer);
+    armedTimer = setTimeout(() => disarmDelete(btn), 3000);
+    return;
+  }
+  clearTimeout(armedTimer);
+  disarmDelete(btn);
+  await removeSession(sid);
+}
+
+async function removeSession(sid) {
+  try {
+    const r = await fetch('/api/sessions/' + encodeURIComponent(sid), { method: 'DELETE' });
+    const d = await r.json();
+    if (sid === sessionId) {          // 删的是当前会话：立刻开一个新的，避免停在空壳上
+      sessionId = newSid();
+      localStorage.setItem(SID_KEY, sessionId);
+      renderSid();
+      renderTranscript([]);
+      $('result').classList.add('hidden');
+    }
+    $('hint').textContent = `已删除会话（${d.deleted} 个快照）`;
+    setTimeout(() => { $('hint').textContent = ''; }, 2500);
+    loadSessions();
+  } catch (e) {
+    $('hint').textContent = '删除失败：' + e;
+  }
+}
+
+document.querySelectorAll('[data-q]').forEach((b) => {
+  b.onclick = () => { $('q').value = b.dataset.q; };
+});
+
+async function refresh() {
+  const r = await fetch('/api/stats');
+  const { summary: s, recent } = await r.json();
+  $('s-runs').textContent = s.runs;
+  $('s-cost').textContent = '¥' + fmt(s.cost_cny, 4);
+  $('s-save').textContent = (s.saved_ratio * 100).toFixed(1) + '%';
+  $('s-lat').textContent = s.avg_latency_ms + 'ms';
+  $('recent').innerHTML = recent.map((x) => `
+    <tr>
+      <td>${x.ts.slice(11)}</td>
+      <td>${x.query.slice(0, 26)}</td>
+      <td>${x.route}</td>
+      <td>${x.latency_ms}ms</td>
+      <td>¥${fmt(x.cost_cny, 6)}</td>
+    </tr>`).join('');
+}
+
+async function send() {
+  const query = $('q').value.trim();
+  if (!query) return;
+  const btn = $('send');
+  btn.disabled = true;
+  $('hint').textContent = '推理中…';
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, session_id: sessionId })
+    });
+    const d = await r.json();
+    if (d.error) { $('hint').textContent = d.error; return; }
+
+    $('result').classList.remove('hidden');
+    $('badge').textContent = d.route === 'easy' ? '本地小模型' : '云端大模型';
+    $('badge').className = 'badge ' + d.route;
+    $('reason').textContent = d.reason + (d.escalated ? ' · 已升级' : '');
+    $('by').textContent = d.decided_by;
+    $('lat').textContent = d.latency_ms + 'ms';
+    $('cost').textContent = '¥' + fmt(d.cost_cny, 6);
+    $('base').textContent = '¥' + fmt(d.baseline_cost_cny, 6);
+    const saved = d.baseline_cost_cny > 0 ? (1 - d.cost_cny / d.baseline_cost_cny) : 0;
+    $('saved').textContent = (saved * 100).toFixed(0) + '%';
+    $('answer').textContent = d.answer || '(空回答)';
+    $('engine').textContent = d.engine || '-';
+    $('hint').textContent = '';
+    refresh();
+    loadTranscript();
+    loadSessions();
+  } catch (e) {
+    $('hint').textContent = '请求失败：' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('send').onclick = send;
+$('q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
+});
+$('new-session').onclick = () => {
+  sessionId = newSid();
+  localStorage.setItem(SID_KEY, sessionId);
+  renderSid();
+  $('result').classList.add('hidden');
+  renderTranscript([]);          // 新会话还没有记录
+  loadSessions();                // 让列表里的高亮跟着变
+  $('hint').textContent = '已开启新会话，旧的会话在下面列表里可以随时切回';
+  setTimeout(() => { $('hint').textContent = ''; }, 3000);
+};
+// 清空全部会话：二次确认，同样不用 confirm
+let armedClearAll = false;
+let clearAllTimer = null;
+$('clear-sessions').onclick = async () => {
+  const btn = $('clear-sessions');
+  if (!armedClearAll) {
+    armedClearAll = true;
+    btn.textContent = '再点一次确认';
+    btn.classList.add('danger');
+    $('hint').textContent = '将删除全部会话记忆（含历史对话），不可恢复';
+    clearAllTimer = setTimeout(() => {
+      armedClearAll = false;
+      btn.textContent = '清空全部会话';
+      btn.classList.remove('danger');
+      $('hint').textContent = '';
+    }, 3000);
+    return;
+  }
+  clearTimeout(clearAllTimer);
+  armedClearAll = false;
+  btn.textContent = '清空全部会话';
+  btn.classList.remove('danger');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/sessions', { method: 'DELETE' });
+    const d = await r.json();
+    sessionId = newSid();
+    localStorage.setItem(SID_KEY, sessionId);
+    renderSid();
+    renderTranscript([]);
+    $('result').classList.add('hidden');
+    $('hint').textContent = `已清空 ${d.deleted} 个会话`;
+    setTimeout(() => { $('hint').textContent = ''; }, 2500);
+    loadSessions();
+  } catch (e) {
+    $('hint').textContent = '清空失败：' + e;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// 清空统计：不用 window.confirm —— 嵌入预览（iframe 沙箱）会把弹窗拦掉，
+// 表现就是"点了没反应"。改成页面内二次确认：第一次点变成"再点一次确认"，3 秒后自动还原。
+let clearArmed = false;
+let clearTimer = null;
+function disarmClear() {
+  clearArmed = false;
+  $('clear').textContent = '清空统计';
+  $('clear').classList.remove('danger');
+}
+$('clear').onclick = async () => {
+  if (!clearArmed) {
+    clearArmed = true;
+    $('clear').textContent = '再点一次确认';
+    $('clear').classList.add('danger');
+    $('hint').textContent = '将删除全部记账记录，不可恢复';
+    clearTimer = setTimeout(() => { disarmClear(); $('hint').textContent = ''; }, 3000);
+    return;
+  }
+  clearTimeout(clearTimer);
+  disarmClear();
+  $('clear').disabled = true;
+  try {
+    const r = await fetch('/api/clear', { method: 'POST' });
+    const d = await r.json();
+    $('result').classList.add('hidden');
+    $('hint').textContent = '已清空 ' + d.deleted + ' 条记录';
+    setTimeout(() => { $('hint').textContent = ''; }, 2500);
+    refresh();
+  } catch (e) {
+    $('hint').textContent = '清空失败：' + e;
+  } finally {
+    $('clear').disabled = false;
+  }
+};
+
+renderSid();
+refresh();
+loadSessions();
+loadTranscript();
+</script>
+</body>
+</html>

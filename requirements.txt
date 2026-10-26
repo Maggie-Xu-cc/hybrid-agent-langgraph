@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+openai>=1.30
+python-dotenv>=1.0
+pydantic>=2.6
+langgraph>=1.0
+langgraph-checkpoint-sqlite>=2.0
