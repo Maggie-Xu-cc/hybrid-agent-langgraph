@@ -23,10 +23,14 @@ OUT = ROOT / ".deploy"
 
 # 白名单：少一个就跑不起来，多一个就不必要
 FILES = ["requirements.txt", ".env", "demo_server.py"]
-DIRS = ["app", "web"]
+# docs 是 RAG 的知识库来源——不带上去，线上检索层就是空转（代码在、数据没在）
+DIRS = ["app", "web", "docs"]
 
 # 这些是本地开发产物，不能带上云
-IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.db", "*.db-wal", "*.db-shm", "*.log")
+IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", "*.db", "*.db-wal", "*.db-shm", "*.log",
+    "evidence",   # 实验日志，几个 MB，线上不需要
+)
 
 
 def main() -> int:

@@ -46,9 +46,46 @@ if not _local_model_reachable():
 os.environ.setdefault("DEMO_QUOTA_PER_DAY", "300")
 os.environ.setdefault("DEMO_RATE_PER_MIN", "10")
 
+
+def _ensure_kb() -> None:
+    """启动时确保 RAG 知识库有索引。
+
+    为什么需要这一步：云端每次部署都是全新的库，`kb_chunks` 表是空的。
+    代码在、数据没在，检索会静默返回空——**RAG 看起来像开着，实际什么都没做**。
+    这种"功能在但不出效果"的问题最难发现，所以放在启动时兜底。
+
+    只在为空时建（163 块约 1~2 秒），已有索引就跳过，不重复计算。
+    """
+    try:
+        from pathlib import Path
+
+        from app import rag, store
+        from app.config import settings
+
+        if not settings.enable_rag:
+            print("[kb] RAG 未启用（ENABLE_RAG=0），跳过", flush=True)
+            return
+        store.init()
+        rag.init()
+        st = rag.stats()
+        if st["chunks"] > 0:
+            print(f"[kb] 已有索引：{st['docs']} 篇 / {st['chunks']} 块", flush=True)
+            return
+        dirs = [d.strip() for d in settings.kb_dirs.split(",") if d.strip()]
+        r = rag.index_dirs(dirs, Path.cwd())
+        print(f"[kb] 已建索引：{r['docs']} 篇 / {r['chunks']} 块"
+              f"（目录 {dirs}）", flush=True)
+        if r["chunks"] == 0:
+            print("[kb] ⚠ 索引为空：docs/ 没上传或路径不对，"
+                  "RAG 会退化（不报错，但检索不到东西）", flush=True)
+    except Exception as exc:   # noqa: BLE001 — 建索引失败不该让服务起不来
+        print(f"[kb] 建索引失败（服务继续，RAG 退化）：{exc}", flush=True)
+
+
 import uvicorn  # noqa: E402
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
+    _ensure_kb()
     # 用字符串形式而不是 app 对象：确保 uvicorn 在环境变量设好之后才导入应用
     uvicorn.run("app.server:app", host="0.0.0.0", port=port, log_level="info")
