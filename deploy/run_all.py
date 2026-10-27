@@ -109,6 +109,8 @@ def main() -> int:
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--skip-cache", action="store_true", help="跳过语义缓存基准")
     parser.add_argument("--quick", action="store_true", help="跳过 8k 长上下文对照压测")
+    parser.add_argument("--cloud-only", action="store_true",
+                        help="没有本地模型时：只产出缓存基准与算力表，并如实标注缺失项")
     parser.add_argument("--concurrency", default="1,4,8")
     parser.add_argument("--num-prompts", type=int, default=16)
     args = parser.parse_args()
@@ -133,11 +135,24 @@ def main() -> int:
 
     ok, msg = check_service()
     print(f"  服务检查：{'✓' if ok else '✗'} {msg}")
-    if not ok:
-        print("\n先把本地服务起起来：")
-        print("  AUP（无 vLLM）：python deploy/local_server.py")
-        print("  有 vLLM 的卡：  bash deploy/start_vllm.sh")
+
+    # 纯云端模式：没有本地小模型时，"三策略对比"和"吞吐压测"都失去意义
+    # （全本地策略会全部降级到云端，对比表变成三条一样的线）。
+    # 与其产出误导性的数据，不如只跑不依赖本地模型的部分，并如实标注缺什么。
+    cloud_only = args.cloud_only or not ok
+    if not ok and not args.cloud_only:
+        print("\n本地模型不可达。两种选择：")
+        print("  1) 起本地模型后重跑（三策略对比必须要有它）")
+        print("     AUP：python deploy/local_server.py   有 GPU 的卡：bash deploy/start_vllm.sh")
+        print("  2) python deploy/run_all.py --cloud-only  → 先产出缓存基准等证据")
         return 1
+    if cloud_only:
+        print("\n本次为【纯云端模式】：跳过压测与三策略对比，"
+              "只产出缓存基准 / 系统信息 / 算力测算（RESULTS.md 会标明缺失项）。")
+        args.skip_bench = True
+        args.skip_eval = True
+        cloud_reason = ("按 --cloud-only 强制跳过本地模型层" if args.cloud_only
+                        else f"本地模型不可达：{msg}")
 
     # ---------- 压测 ----------
     tps = None
@@ -167,6 +182,7 @@ def main() -> int:
     else:
         print("\n已跳过压测。")
 
+    tps_estimated = tps is None
     if tps is None:
         tps = 800
         print(f"⚠ 没拿到实测吞吐，算力表按 {tps} tok/s 估算——报告里必须换成实测值。")
@@ -180,7 +196,7 @@ def main() -> int:
 
     # ---------- 语义缓存基准 ----------
     if not args.skip_cache:
-        run_step([py, "tools/cache_bench.py", "--quiet"],
+        run_step([py, "tools/cache_bench.py", "--quiet", "--workers", "4"],
                  EVID / "cache_bench.log", "语义缓存基准（基线/精确命中/语义命中）")
 
     # ---------- 算力重算 ----------
@@ -199,13 +215,33 @@ def main() -> int:
     cache_txt = (EVID / "cache_bench.log").read_text(encoding="utf-8") if (EVID / "cache_bench.log").exists() else ""
     cap_txt = (EVID / "capacity.md").read_text(encoding="utf-8") if (EVID / "capacity.md").exists() else ""
 
+    mode_note = ""
+    if cloud_only:
+        mode_note = f"""
+> ⚠️ **本次采集为纯云端模式**（{cloud_reason}）
+>
+> 缺以下两节，原因不是没跑，而是**没有本地小模型时跑了也是错的**：
+> - 并发压测 / 长上下文对照：测的就是本地模型吞吐，没它没得测
+> - 三策略对比：全本地策略会全部降级到云端，三条线变成一样的，对比失去意义
+>
+> **读第三节的缓存数据时注意一个污染点**：本地模型缺席时，路由的
+> "模型判断层"也被跳过了，只靠规则猜难易，部分 hard 用例会被判成 easy。
+> 结果是第 2 遍命中率偏高（高于"easy 用例占比"这个理论上限）。
+> 第 3 遍的语义召回率受影响较小，可以看；第 2 遍的命中率不可直接引用。
+>
+> 补齐方式：起本地模型（`python deploy/local_server.py`）后重跑
+> `python deploy/run_all.py`，这两节会自动补上，缓存数字也才是干净的。
+"""
+
     results = f"""# 云端预演结果汇总（自动生成）
 
 - 采集时间：{summary['time']}
+- 运行模式：**{'纯云端（无本地模型）' if cloud_only else '混合（本地 + 云端）'}**
+{mode_note}
 - 实例：{socket.gethostname()}
 - 模型：`{settings.local_model}`  服务：`{settings.local_base_url}`
 - 云端兜底：`{settings.cloud_model}`
-- **实测单卡吞吐：{tps} tok/s**（并发压测得到，非估算）
+- **单卡吞吐：{tps} tok/s（{'估算值，非实测' if tps_estimated else '实测，来自并发压测'}）**
 
 ## 一、并发压测（默认上下文）
 

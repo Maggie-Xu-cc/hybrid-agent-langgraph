@@ -1,0 +1,40 @@
+## 时间
+2026-10-27 14:00:16
+
+## 主机
+MINGW64_NT-10.0-19045 ��ĵ毵ĵ��� 3.6.9-b4195d69.x86_64 2026-06-06 17:49 UTC x86_64 Msys
+
+## Python
+Python 3.13.14
+
+## rocm-smi
+[FileNotFoundError] rocm-smi 执行失败: [WinError 2] 系统找不到指定的文件。
+
+
+## 显存信息
+[FileNotFoundError] rocm-smi --showmeminfo vram 执行失败: [WinError 2] 系统找不到指定的文件。
+
+
+## 显卡型号
+[FileNotFoundError] rocm-smi --showproductname 执行失败: [WinError 2] 系统找不到指定的文件。
+
+
+## 架构代号
+/etc/msystem: line 26: /etc/msystem.d/MSYS: No such file or directory
+bash: line 1: rocminfo: command not found
+
+
+## vLLM 版本
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import vllm; print(vllm.__version__)
+    ^^^^^^^^^^^
+ModuleNotFoundError: No module named 'vllm'
+
+
+## torch
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import torch; print(torch.__version__, torch.version.hip)
+    ^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'torch'

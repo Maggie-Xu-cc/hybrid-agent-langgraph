@@ -16,3 +16,7 @@ checkpoints.db
 # 说明：docs/evidence/ 和 eval/result.csv 故意不忽略——
 # 它们是"真的在云端跑过"的证据，要跟着仓库一起公开给老师看。
 .tmpweb*
+
+# 本地开发数据：部署前挪到这里，避免把会话记录传上云端
+.localdata/
+.deploy/

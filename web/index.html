@@ -56,6 +56,11 @@
   }
   .badge.easy { background: var(--easy-bg); color: var(--easy); }
   .badge.hard { background: var(--hard-bg); color: var(--hard); }
+  .badge.cache { background: #eeecfa; color: var(--accent); }
+  .notice {
+    background: var(--hard-bg); color: var(--hard); border: 1px solid #eddcc0;
+    border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: -8px 0 16px;
+  }
   .meta { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 10px 0 14px; }
   .meta b { color: var(--text); font-weight: 500; }
   .answer { white-space: pre-wrap; font-size: 14px; }
@@ -95,6 +100,7 @@
 <div class="wrap">
   <h1>混合推理 Agent · 路由演示</h1>
   <div class="sub">简单请求走本地小模型，复杂请求升级到云端大模型。每一笔 Token 与成本都会被记录。</div>
+  <div id="mode-note" class="notice hidden"></div>
 
   <div class="card">
     <textarea id="q" placeholder="输入一个问题，例如：把「今天天气不错」翻译成英文"></textarea>
@@ -304,11 +310,23 @@ document.querySelectorAll('[data-q]').forEach((b) => {
 
 async function refresh() {
   const r = await fetch('/api/stats');
-  const { summary: s, recent, cache } = await r.json();
+  const { summary: s, recent, cache, local_enabled, quota } = await r.json();
   $('s-runs').textContent = s.runs;
   $('s-cost').textContent = '¥' + fmt(s.cost_cny, 4);
   $('s-save').textContent = (s.saved_ratio * 100).toFixed(1) + '%';
   $('s-lat').textContent = s.avg_latency_ms + 'ms';
+
+  // 如实标注当前运行形态：云端容器里没有 GPU，本地小模型这一层是缺席的。
+  // 不说清楚的话，访客会以为看到的数字来自混合路由。
+  const notes = [];
+  if (local_enabled === false) {
+    notes.push('线上版为纯云端模式：本地小模型跑在我自己的机器上，云端容器没有 GPU。'
+             + '路由、缓存、记忆、记账逻辑与本地版一致，只是"简单请求"由云端代答。');
+  }
+  if (quota) notes.push(`今日演示额度 ${quota.used}/${quota.limit} 次`);
+  $('mode-note').className = notes.length ? 'notice' : 'notice hidden';
+  $('mode-note').textContent = notes.join(' · ');
+
   if (cache) {
     $('s-cache').textContent = s.cache_hits ?? 0;
     $('s-cache-ratio').textContent = ((s.cache_hit_ratio || 0) * 100).toFixed(1) + '%';
@@ -341,8 +359,12 @@ async function send() {
     if (d.error) { $('hint').textContent = d.error; return; }
 
     $('result').classList.remove('hidden');
-    $('badge').textContent = d.route === 'easy' ? '本地小模型' : '云端大模型';
-    $('badge').className = 'badge ' + d.route;
+    // 显示"实际产出这一轮答案的层"，而不是"打算走哪一层"。
+    // 本地模型挂掉降级到云端时 route 仍是 easy，照 route 显示就等于撒谎。
+    const LAYER = { cache: ['语义缓存命中', 'cache'], local: ['本地小模型', 'easy'], cloud: ['云端大模型', 'hard'] };
+    const [label, cls] = LAYER[d.layer] || LAYER.cloud;
+    $('badge').textContent = label;
+    $('badge').className = 'badge ' + cls;
     $('reason').textContent = d.reason + (d.escalated ? ' · 已升级' : '');
     $('by').textContent = d.decided_by;
     $('lat').textContent = d.latency_ms + 'ms';

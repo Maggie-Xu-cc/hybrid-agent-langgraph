@@ -61,6 +61,11 @@ class Settings:
     # graph.py 导入失败（未装 langgraph）时 server.py 会自动回退
     enable_langgraph: bool = os.getenv("ENABLE_LANGGRAPH", "1") == "1"
 
+    # 公开演示护栏（app/guard.py）。0 = 不限制，本地开发保持全放开；
+    # 部署到公网时必须收紧，否则链接被转发后会把 API 额度刷光。
+    demo_quota_per_day: int = int(os.getenv("DEMO_QUOTA_PER_DAY", "0"))
+    demo_rate_per_min: int = int(os.getenv("DEMO_RATE_PER_MIN", "0"))
+
     price_local_per_1k: float = float(os.getenv("PRICE_LOCAL_PER_1K", "0.0028"))
     price_cloud_in_per_1k: float = float(os.getenv("PRICE_CLOUD_IN_PER_1K", "0.005"))
     price_cloud_out_per_1k: float = float(os.getenv("PRICE_CLOUD_OUT_PER_1K", "0.015"))

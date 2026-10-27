@@ -7,6 +7,16 @@
 >
 > 三级降本思路：**语义缓存命中（0 成本）→ 规则层拦下大部分请求（0 成本）→ 本地小模型承接简单请求（低）→ 云端大模型只处理真正难的（高）**。
 
+## 在线试用
+
+**https://hybrid-router-agent.app.workbuddy.host/?sharecode=CLU3I2I6TH**
+
+一句话说明它和本地的差别：**云端容器没有 GPU，所以线上是纯云端形态**——路由、缓存、记忆、记账的逻辑与本地完全一致，只是"简单请求"那一层由云端代答。页面上会明确标注当前是哪一层产出的答案，不会把云端的结果说成本地小模型的功劳。
+
+额度 300 次/天、单 IP 10 次/分钟：这是个人项目，背后是真实 API 计费，限额是为了让最坏情况的支出可预期。
+
+想看完整的混合链路（真·本地小模型承接），按下面「本地运行」起本地模型即可。
+
 ## 架构
 
 ```
@@ -282,6 +292,31 @@ python tools/bench_throughput.py --concurrency 1,4,8 --num-prompts 16
   规则层判成 easy 的用例——因为 `DISABLE_LOCAL=1` 关掉了路由的模型层。
   要出报告数字，本地模型必须在位。
 
+### 线上实测（2026-10-27，公开链接上的两次真实调用）
+
+| 请求 | 实际产出层 | 延迟 | 成本 |
+|---|---|---|---|
+| 「用一句话解释什么是 REST API」 | cloud（云端代答） | 1054 ms | ¥0.00073 |
+| 「REST API 是什么？」 | **cache**（相似度 0.569） | **3 ms** | **¥0** |
+
+同一句话换个说法再问一次：**延迟降 350 倍，成本归零**。这就是语义缓存存在的全部理由。
+
+### 完整证据链
+
+上面每个数字都有原始日志，不是手填的：
+
+```
+docs/evidence/
+  RESULTS.md        汇总（自动生成，含缺失项说明）
+  cache_bench.log   缓存基准原始输出
+  capacity.md       算力测算（按实测/估算吞吐分别标注）
+  system.txt        采集环境信息
+  models.json       服务端模型列表
+```
+
+复现方式：`python deploy/run_all.py`（没有本地模型时用 `--cloud-only`，它会明确告诉你
+哪几节缺、为什么缺）。
+
 ## 成本模型
 
 ```
@@ -310,7 +345,11 @@ app/
   context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/摘要/历史）
   memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
   store.py     SQLite 记录与统计（含分层追踪 by_layer）
-  server.py    FastAPI 服务（按开关选择链路，返回 engine 字段）
+  dbutil.py    SQLite 连接参数 + 忙/只读重试（重试贴着 SQL，不重跑模型）
+  guard.py     公开演示护栏：每日额度 + 单 IP 限频
+  server.py    FastAPI 服务（按开关选择链路，返回 engine 与 layer 归因）
+demo_server.py 云端部署入口（读 PORT、绑 0.0.0.0、自动判定要不要启用本地层）
+run_server.py  本地 PyCharm 入口（127.0.0.1:8080，右键 Run 即用）
 web/index.html 演示页面（自动生成并复用 session_id 与 user_id，「新会话」/「忘掉我」）
 eval/
   testset.jsonl  标注测试集
@@ -324,8 +363,11 @@ tools/
   smoke_cache.py      语义缓存冒烟测试（离线，36 项断言）
   smoke_breaker.py    本地熔断器冒烟测试（离线，17 项断言）
 deploy/
-  start_vllm.sh  环境判定 + 下权重 + 起 vLLM（换独立显卡后的备用脚本）
-  run_all.py     一键采集：压测 + 评测 + 算力重算 + 归档
+  local_server.py    本地模型服务（transformers + 标准库 HTTP，无 vLLM 的机器用）
+  start_vllm.sh      环境判定 + 下权重 + 起 vLLM（有 GPU 且能装 vLLM 时用）
+  run_all.py         一键采集：压测 + 评测 + 缓存基准 + 算力重算 + 归档（--cloud-only 无本地模型时）
+  prepare_bundle.py  生成部署包（白名单拷贝，避免把 venv 和本地数据库传上云）
+docs/evidence/   实验结果与原始日志（RESULTS.md 为自动生成的汇总）
 docs/deploy.md   AMD ROCm 部署手册
 docs/data-dictionary.md  记账表字段说明与成本归因
 docs/code-reading.md     代码精读（面试复习用）

@@ -4,11 +4,11 @@ from pathlib import Path
 
 import sqlite3
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import cache, memory, store
+from . import cache, guard, memory, store
 from .agent import run
 from .clients import local_breaker
 from .config import settings
@@ -42,14 +42,48 @@ class ChatIn(BaseModel):
 def _startup() -> None:
     store.init()
     memory.init()
+    guard.init()          # 演示额度表（不设额度时仅建表，无实际限制）
     if settings.enable_cache:
         cache.init()
         cache.purge_expired()   # 启动时清一次过期条目，之后命中时也会顺带跳过
 
 
+@app.middleware("http")
+async def demo_guard_middleware(request: Request, call_next):
+    """只拦花钱的 /api/chat：读统计、看会话都免费，没必要限。
+
+    两个开关都为 0 时整段直接跳过——本地开发完全不受影响。
+    """
+    if (request.url.path == "/api/chat"
+            and (settings.demo_quota_per_day > 0 or settings.demo_rate_per_min > 0)):
+        ip = request.client.host if request.client else ""
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:                      # 反向代理后面拿真实来源
+            ip = forwarded.split(",")[0].strip()
+        ok, reason = guard.check(ip or "unknown")
+        if not ok:
+            return JSONResponse(status_code=429, content={"error": reason})
+    return await call_next(request)
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(WEB)
+
+
+def _layer_of(result: dict) -> str:
+    """这一轮答案实际是哪一层产出的：cache / local / cloud。
+
+    为什么不复用 route（easy/hard）：route 是"打算走哪一层"，
+    layer 是"实际走了哪一层"——本地模型挂了降级到云端时，route 仍是 easy，
+    但答案明明是云端生成的。页面上要显示后者，否则等于撒谎。
+    """
+    if result.get("decided_by") == "cache" or result.get("cache_hit"):
+        return "cache"
+    model = str(result.get("model", ""))
+    if settings.local_model and model.startswith(settings.local_model):
+        return "local"
+    return "cloud"
 
 
 @app.post("/api/chat")
@@ -75,6 +109,7 @@ def api_chat(body: ChatIn) -> dict:
         engine = "plain"
     if "error" not in result:
         result["engine"] = engine
+        result["layer"] = _layer_of(result)
     return result
 
 
@@ -83,7 +118,14 @@ def api_stats() -> dict:
     return {"summary": store.stats(), "recent": store.recent(8),
             "cache": cache.stats() if settings.enable_cache else None,
             # 本地熔断状态：本地模型挂了时页面能看到"已短路"，不至于以为卡死
-            "local_breaker": local_breaker.state()}
+            "local_breaker": local_breaker.state(),
+            # 本地模型层是否启用。云端部署时一定是 False——页面据此说明
+            # "线上版走纯云端"，避免访客以为自己看到的是混合路由的结果。
+            "local_enabled": not settings.disable_local,
+            # 演示额度：公网版看"还剩多少次"，本地版是 None（不限制）
+            "quota": ({"limit": settings.demo_quota_per_day,
+                       "used": guard.today_used()}
+                      if settings.demo_quota_per_day > 0 else None)}
 
 
 @app.get("/api/cache")
