@@ -17,6 +17,11 @@
 
 想看完整的混合链路（真·本地小模型承接），按下面「本地运行」起本地模型即可。
 
+线上也能试工具层，两条现成的：
+
+- **让它动手查库**：问「记账表里一共有多少条记录，其中有多少条是缓存命中的」——它会调 `sql_query`，页面上能看到每一步的参数和结果；
+- **让它连外部服务**：问「便签里有哪些关于开题的」——这不是本地工具，是 Agent 现场连上一个独立的 MCP 进程问出来的（`MCP_SERVERS` 配的那个便签服务）。
+
 ## 架构
 
 ```
@@ -225,6 +230,55 @@ system 人设（必留）＋ 长期记忆事实（≤200 tok）＋ 早前摘要�
 
 页面上每一次调用都会列出来：第几步、调了什么、参数是什么、结果几行、花了多久。
 "调了 3 次工具"这句话本身没有信息量，能证明它会动手的是**每一步的参数和结果**。
+
+### MCP：把工具从代码里搬出去（v2.1）
+
+工具层做完会暴露一个问题：**每加一个工具都要改 `app/tools/builtin.py`，再重新部署**。
+工具和 Agent 长在一起，就是耦合。MCP（Model Context Protocol）解决的就是这件事——
+工具跑在**独立进程**里，Agent 启动时连上去问"你会什么"，把答出来的工具注册进自己的工具表。
+于是"加一个工具"从改代码变成**改一行配置**。
+
+协议本身很朴素，一段话能讲完（面试真会问）：**按行分隔的 JSON-RPC 2.0**，一行一条 JSON，
+方法只有五个——`initialize`（握手，协商协议版本与能力）、`notifications/initialized`（通知，告诉对方可以开始了）、
+`tools/list`（你会什么）、`tools/call`（干活）、`ping`。字段是 camelCase（`inputSchema`、`readOnlyHint`），
+**通知没有 `id`，也绝对不能回复**。传输层是 stdio，所以 **stdout 只准放协议消息，日志一律走 stderr**——
+把 `print` 调试信息打到 stdout，是最常见的"客户端解析失败"。
+
+本项目全部手写，零依赖（只要标准库）：
+
+| 文件 | 干什么 |
+|---|---|
+| `app/mcp/protocol.py` | 消息读写、错误码、结果封装 |
+| `app/mcp/server.py` | 手写服务端：握手、通知不回包、未知工具返回可用清单 |
+| `app/mcp/client.py` | 手写客户端：常驻子进程 + 后台读线程 + 队列 + 按 id 匹配 + 超时 |
+| `app/mcp/bridge.py` | 把远端工具包成本地 `ToolSpec` 注册进注册表；权限按 annotations 映射 |
+| `mcp_servers/notes.py` | 一个跟项目**毫无关系**的独立服务：便签（增 / 查 / 列），数据落自己的 `notes.db` |
+| `mcp_servers/project_tools.py` | 反过来的用法：把项目已有工具通过 MCP 暴露给别的客户端 |
+
+**为什么值得单独写一个"便签"服务**：它有自己的库、自己的状态，Agent 一行代码都不知道它存在，
+只在 `MCP_SERVERS` 里加一行就接上了。而且它演示了工具层做不到的事——**状态在服务里，不在上下文里**：
+记一条便签，重启 Agent 再问，便签还在。这条比"我把自己的函数包装了一遍"有说服力得多。
+
+三个真踩过的坑：
+
+1. **Windows 上 stdio 编码**：子进程默认 cp936，客户端按 UTF-8 解析 → 中文变乱码，
+   报的却是"JSON 解析失败"（一个完全错误的方向）。必须 `ensure_utf8()` 在任何 `print` 之前调用。
+2. **同步代码对接异步协议**：官方 SDK 是 async 的，在同步端点里 `asyncio.run()` 每次新建事件循环和子进程，
+   一次调用多几百毫秒还把生命周期搞得很脆。改成常驻子进程 + 读线程 + 队列，100 行没有魔法。
+3. **重启要换新队列**：进程被 kill 后，上一代读线程还会补一条 EOF 进队列。共用队列的话，
+   重启后的第一个请求先读到"死进程的遗言"，表现成"刚恢复就又挂了"——只在特定时序复现
+   （同一份代码两个解释器，一个过一个不过，查了半小时）。每代进程配一个自己的队列。
+
+验证（`python tools/smoke_mcp.py`，26 项）：自写 client ↔ 自写 server 互通、脏行不致命、
+权限闸门、Agent 端到端、kill 后自愈，最后一条最关键——**用官方 `mcp` 包当客户端连我们手写的 server**
+（协商到协议 2025-11-25）。自己写的 client 连自己写的 server 只能证明"两边一起错"，
+官方客户端能连上才叫兼容。
+
+线上只放 `read` 级（`TOOL_LEVELS=read`）：`run_python` 是 danger 级，等于把 shell 挂在公网页面上，
+一句提示注入 `print(open('.env').read())` 就能把云端 API Key 读走。所以在线上你看到的现象是
+**便签读得到、写不进去**——`write` 级工具压根不会出现在模型的工具表里（`all_specs(levels)` 就过滤掉了），
+它只会告你"我没有写入权限"；万一它硬点名调用，`toolreg.call` 还会再拦一次并把可用工具列给它。
+两道闸都在，这不是没接好，是接对了。
 
 ### 历史会话可以切回去
 
@@ -508,6 +562,11 @@ app/
   react.py     ReAct 循环：步数/预算/重复调用/观察截断/出错让模型自救
   tools/       工具层：注册表 + JSON Schema 校验 + 权限分级 + 统一截断
     builtin.py  四个工具：search_docs / sql_query / fetch_url / run_python
+  mcp/         手写 MCP 实现（零依赖，只要标准库）
+    protocol.py 消息读写（按行分隔的 JSON-RPC 2.0）
+    server.py   服务端：initialize 协商、通知不回包、tools/list、tools/call
+    client.py   客户端：常驻子进程 + 读线程 + 队列 + 按 id 匹配 + 超时/重启
+    bridge.py   桥接：远端工具 → 本地 ToolSpec，权限按 annotations 映射
   context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/检索/摘要/历史）
   memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
   store.py     SQLite 记录与统计（含分层追踪 by_layer）
@@ -517,6 +576,9 @@ app/
 demo_server.py 云端部署入口（读 PORT、绑 0.0.0.0、自动判定要不要启用本地层）
 run_server.py  本地 PyCharm 入口（127.0.0.1:8080，右键 Run 即用）
 web/index.html 演示页面（自动生成并复用 session_id 与 user_id，「新会话」/「忘掉我」）
+mcp_servers/
+  notes.py         独立的便签 MCP 服务（跨进程状态：重启 Agent 便签还在）
+  project_tools.py 把项目已有工具通过 MCP 暴露给别的客户端（不要自己连自己，会成环）
 eval/
   testset.jsonl  标注测试集（24 条，用于跑成本/路由对比）
   pairs.jsonl    缓存阈值评测集（89 条，含 26 条"正确答案不在缓存里"的危险负样本）
@@ -534,14 +596,16 @@ tools/
   smoke_agent.py      工具层 + ReAct 循环冒烟测试（离线，40 项断言，脚本化模型）
   smoke_rag.py        RAG 检索冒烟测试（离线，47 项断言）
   smoke_breaker.py    本地熔断器冒烟测试（离线，17 项断言）
+  smoke_mcp.py        MCP 冒烟测试（离线，26 项；含用官方 SDK 当客户端验证互操作）
 deploy/
   local_server.py    本地模型服务（transformers + 标准库 HTTP，无 vLLM 的机器用）
   start_vllm.sh      环境判定 + 下权重 + 起 vLLM（有 GPU 且能装 vLLM 时用）
   run_all.py         一键采集：压测 + 评测 + 缓存基准 + 算力重算 + 归档（--cloud-only 无本地模型时）
   aup_setup.sh       AUP 环境自检 + 装依赖 + 预下权重（--install / --predownload）
-  prepare_bundle.py  生成部署包（白名单拷贝；加 --with-bge 连 91MB 模型一起打包，线上才有真尺子）
+  prepare_bundle.py  生成部署包（白名单拷贝；--with-bge 带 91MB 模型，--public 收紧工具权限）
 requirements-aup.txt   AUP 专用追加依赖（transformers；torch 用镜像自带的 ROCm 版）
 requirements-bge.txt   本地 BGE 向量模型依赖（可选：装了缓存才用真 embedding）
+requirements-mcp.txt   官方 mcp 包（只在冒烟里当客户端，验证互操作；项目本身零依赖）
 docs/evidence/   实验结果与原始日志（RESULTS.md 为自动生成的汇总）
 docs/aup-quickstart.md   AUP 照抄版上手指南（每步应该看到什么 / 会话怎么拆）
 docs/deploy.md   AMD ROCm 部署手册

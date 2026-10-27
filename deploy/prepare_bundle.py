@@ -8,6 +8,7 @@
 用法：
     python deploy/prepare_bundle.py            # 生成/刷新 .deploy/（约 290KB，无模型）
     python deploy/prepare_bundle.py --with-bge # 连 91MB 向量模型一起打包（约 92MB）
+    python deploy/prepare_bundle.py --with-bge --public   # 公网发布用（收紧工具权限）
     然后对 .deploy 目录执行发布。
 
 --with-bge 会多做两件事，缺一不可：
@@ -32,7 +33,8 @@ OUT = ROOT / ".deploy"
 # 白名单：少一个就跑不起来，多一个就不必要
 FILES = ["requirements.txt", ".env", "demo_server.py"]
 # docs 是 RAG 的知识库来源——不带上去，线上检索层就是空转（代码在、数据没在）
-DIRS = ["app", "web", "docs"]
+# mcp_servers 是外部工具服务（独立的 MCP server 进程），MCP_SERVERS 里配了就要带上
+DIRS = ["app", "web", "docs", "mcp_servers"]
 
 # 可选的向量模型（见 requirements-bge.txt 的说明）。
 # 只带这 5 个文件：model.onnx 是 44KB 的图，真正的权重在 model.onnx_data 里（91MB），
@@ -41,6 +43,21 @@ BGE_SRC = ROOT / "models" / "bge-small-zh"
 BGE_FILES = ["config.json", "model.onnx", "model.onnx_data",
              "tokenizer.json", "tokenizer_config.json"]
 BGE_REQ = ["onnxruntime>=1.20", "tokenizers>=0.15"]
+
+# 公网部署必须收紧的几项（--public 时覆盖进包里的 .env）。
+# 为什么在打包脚本里做，而不是让大家记得改 .env：本地开发需要 run_python 才好调试，
+# 一忙起来直接 `python deploy/prepare_bundle.py` 就发上去了——**默认路径必须是安全的**，
+# 要放开得显式加参数。
+PUBLIC_ENV = {
+    # 只放只读工具。danger 级（run_python）等于把 shell 挂在公网页面上：
+    # 提示注入一句 print(open('.env').read()) 就能把云端 API Key 读走。
+    "TOOL_LEVELS": "read",
+    "TOOL_ALLOW_DANGER": "0",
+    # 连一个好不相干的外部工具服务，演示"加工具只改配置"
+    "MCP_SERVERS": "notes=python -m mcp_servers.notes",
+    # 只读级别下 add 会被闸门拦住，先灌几条示例便签，search/list 才有东西可查
+    "NOTES_SEED": "1",
+}
 
 # 这些是本地开发产物，不能带上云
 IGNORE = shutil.ignore_patterns(
@@ -77,8 +94,27 @@ def _add_bge() -> int:
     return 0
 
 
+def _harden_env() -> None:
+    """把公网安全项覆盖进包里的 .env（只改包里的那份，不动仓库里的 .env）。
+
+    做法是"先删同名的键，再追加"——.env 是逐行读的，同名键后出现的会覆盖前面的，
+    但留着旧的容易让人 grep 到错的那一行，干脆删干净。
+    """
+    env = OUT / ".env"
+    lines = env.read_text(encoding="utf-8").splitlines()
+    kept = [ln for ln in lines
+            if not any(ln.strip().startswith(k + "=") for k in PUBLIC_ENV)]
+    kept.append("")
+    kept.append("# ===== 公网安全项（deploy/prepare_bundle.py --public 写入）=====")
+    for k, v in PUBLIC_ENV.items():
+        kept.append(f"{k}={v}")
+    env.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    print("  · 公网安全项：" + "，".join(f"{k}={v}" for k, v in PUBLIC_ENV.items()))
+
+
 def main() -> int:
     with_bge = "--with-bge" in sys.argv[1:]
+    public = "--public" in sys.argv[1:]
 
     if not (ROOT / ".env").exists():
         print("✗ 缺少 .env：云端服务需要 CLOUD_API_KEY 才能回答，先准备 .env")
@@ -107,6 +143,9 @@ def main() -> int:
 
     total = sum(f.stat().st_size for f in OUT.rglob("*") if f.is_file())
     print(f"\n部署包：{OUT}  ({total / 1024:.0f} KB)")
+
+    if public:
+        _harden_env()
 
     if with_bge and _add_bge() != 0:
         return 1

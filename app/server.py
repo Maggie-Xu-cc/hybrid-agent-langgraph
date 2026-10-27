@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import cache, embedder, guard, memory, rag, store, tools as toolreg
+from .mcp import bridge as mcp_bridge
 from .agent import run
 from .clients import local_breaker
 from .config import settings
@@ -41,6 +42,14 @@ class ChatIn(BaseModel):
 @app.on_event("startup")
 def _startup() -> None:
     store.init()
+    # MCP：连上配置里的外部工具服务，把它们注册进本地工具表。
+    # 失败只打警告不阻塞——一个外部服务没起来，不该让整个 Agent 挂掉。
+    try:
+        st = mcp_bridge.bootstrap()
+        if st.get("enabled"):
+            print(f"[mcp] {st['count']} 个服务 / {st['tools']} 个外部工具已就绪", flush=True)
+    except Exception as exc:   # noqa: BLE001
+        print(f"[mcp] 初始化失败（服务继续，只是没有外部工具）：{exc}", flush=True)
     memory.init()
     guard.init()          # 演示额度表（不设额度时仅建表，无实际限制）
     if settings.enable_cache:
@@ -151,6 +160,11 @@ def api_stats(session_id: str | None = None, recent_limit: int = 30) -> dict:
                       if settings.demo_quota_per_day > 0 else None)}
 
 
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    mcp_bridge.shutdown()
+
+
 @app.get("/api/tools")
 def api_tools() -> dict:
     """工具清单：Agent 现在会哪些动作、危险级别、循环上限。
@@ -164,7 +178,11 @@ def api_tools() -> dict:
             "result_chars": settings.tool_result_chars,
             "allow_danger": settings.tool_allow_danger,
             "fetch_domains": [d.strip() for d in settings.tool_fetch_domains.split(",") if d.strip()],
-            "tools": toolreg.describe()}
+            # 这一轮实际放行的级别：公网只放 read，本机可以开到 danger
+            "levels": list(settings.allowed_levels()),
+            "tools": toolreg.describe(settings.allowed_levels()),
+            # 外部（MCP）工具：连了谁、各自有几个工具、协议版本
+            "mcp": mcp_bridge.status()}
 
 
 @app.get("/api/cache")

@@ -112,6 +112,26 @@ class Settings:
         "docs.python.org,github.com,raw.githubusercontent.com,pypi.org,example.com")
     sql_row_limit: int = int(os.getenv("SQL_ROW_LIMIT", "50"))
 
+    # 允许哪些级别的工具跑。留空=按 tool_allow_danger 推；公网部署建议 TOOL_LEVELS=read
+    tool_levels: str = os.getenv("TOOL_LEVELS", "")
+
+    # ---------------- MCP（app/mcp/）----------------
+    # 格式：name=命令 参数;name2=命令 参数
+    # 例：notes=python -m mcp_servers.notes
+    # 留空 = 不连任何 MCP server（工具层照常工作，只是少了外部工具）
+    mcp_servers: str = os.getenv("MCP_SERVERS", "")
+    mcp_timeout: float = float(os.getenv("MCP_TIMEOUT", "10"))
+
+    def allowed_levels(self) -> tuple[str, ...]:
+        """本轮允许调用哪些危险级别。
+
+        为什么不只用一个布尔：公网演示常见需求是"只读工具全开、写操作全关"，
+        布尔只能表达"全开/全关"，中间那档（read+write，但不许执行代码）表达不了。
+        """
+        if self.tool_levels.strip():
+            return tuple(x.strip() for x in self.tool_levels.split(",") if x.strip())
+        return ("read", "write", "danger") if self.tool_allow_danger else ("read", "write")
+
     # 公开演示护栏（app/guard.py）。0 = 不限制，本地开发保持全放开；
     # 部署到公网时必须收紧，否则链接被转发后会把 API 额度刷光。
     demo_quota_per_day: int = int(os.getenv("DEMO_QUOTA_PER_DAY", "0"))

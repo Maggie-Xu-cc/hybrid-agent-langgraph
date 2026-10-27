@@ -133,7 +133,7 @@ def run(
     max_steps = max_steps or settings.tool_max_steps
     budget = settings.tool_budget_cny if budget_cny is None else budget_cny
     if levels is None:
-        levels = toolreg.LEVELS if settings.tool_allow_danger else ("read", "write")
+        levels = settings.allowed_levels()
     model_fn = model_fn or _default_model
 
     specs = toolreg.openai_tools(levels)

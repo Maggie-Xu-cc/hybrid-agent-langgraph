@@ -2065,3 +2065,175 @@ P3 才真正需要，它有个硬约束：**只能在节点边界暂停**。到�
 5. 为什么"动过手的答案"不能写进语义缓存？`kb_version` 为什么管不了这件事？
 6. 工具循环的 token 成本为什么是普通问答的 2~3 倍？两条能省的优化分别省在哪？
 7. 为什么第一版不把循环做成 LangGraph 子图？到哪一步必须改，为什么？
+
+
+## 21. 把工具搬出进程：MCP（v2.1）
+
+第 20 节结束时，工具能用了，但暴露了一个结构问题：**工具和 Agent 长在一起**。
+`search_docs`、`sql_query` 都是 `app/tools/builtin.py` 里的函数，加一个就要改代码、重新部署，
+而且它只能服务这一个项目。
+
+MCP 只做一件事：**让工具住在别的进程里，Agent 运行时去问"你会什么"，把答出来的东西注册进自己的工具表**。
+从 Agent 这侧看，远端工具和本地工具**没有任何区别**——参数校验、权限分级、结果截断、重复调用检测、
+记账，全部复用同一套。这就是它值钱的地方：不是协议新，而是**"谁会什么"从代码里解耦成了运行时契约**。
+
+### 21.1 协议本身比传闻朴素得多
+
+一句话：**按行分隔的 JSON-RPC 2.0**。一行一条 JSON，`\n` 分隔，方法只有五个：
+
+| 方法 | 方向 | 干什么 |
+|---|---|---|
+| `initialize` | C→S | 握手：交换协议版本与能力（我们只声明 `tools`） |
+| `notifications/initialized` | C→S | 通知：我准备好了（**通知没有 id，不能回复**） |
+| `tools/list` | C→S | 列出工具，每个带 `inputSchema` 与 `annotations` |
+| `tools/call` | C→S | 调一个工具，拿回 `content` 数组 + `isError` |
+| `ping` | C→S | 保活 |
+
+三条容易被讲错、也最容易写错的细节：
+
+1. **stdout 就是协议通道**。任何 `print("调试")` 都会变成客户端解析失败的根源，
+   而且报错信息（"不是合法 JSON"）完全指不到真凶。所以日志一律 `file=sys.stderr`。
+2. **字段是 camelCase**：`protocolVersion` / `inputSchema` / `serverInfo` / `isError`。
+   自己写 Python 习惯了 snake_case，一不留神就写成 `input_schema`，客户端静默拿到空 schema。
+   顺带一个反向的坑：**官方 Python SDK 的对象属性是 snake_case**（`server_info`、
+   `protocol_version`、`is_error`），验证脚本里按 camelCase 取会报 `AttributeError`。
+3. **通知不能回包**。回了，客户端会当成一条匹配不上任何请求的响应——轻则报错，重则卡死。
+
+`initialize` 里有个小策略值得抄：**沿用客户端给的版本**。
+
+```python
+want = str(params.get("protocolVersion") or FALLBACK_VERSION)
+return result(req_id, {"protocolVersion": want or FALLBACK_VERSION, ...})
+```
+
+严格实现会拿自己的版本去比，对不上就让客户端断开。我们选择"能对上就对上"：
+演示场景里最重要的是一句话就把工具接上，而不是在版本号上较真。
+（实测官方 SDK 协商到的是 `2025-11-25`，比我们写的 `2025-06-18` 新，沿用它的就能连上。）
+
+### 21.2 桥接：一行配置换一个服务
+
+`app/mcp/bridge.py` 干的事只有一件——**把远端的工具描述包成本地 `ToolSpec` 注册进去**：
+
+```python
+local = f"{name}_{remote}"          # 前缀防撞：远端工具重名会互相覆盖
+toolreg.register(toolreg.ToolSpec(
+    name=local,
+    description=f"[MCP:{name}] {desc}",
+    parameters=t.get("inputSchema") or {"type": "object", "properties": {}},
+    handler=_make_handler(name, remote),
+    level=_level_of(t),             # annotations → read / write / danger
+))
+```
+
+注册完之后，模型看到的工具表和本地工具混在一起，`react.run` 完全不知道有些工具跑在别的进程里。
+
+两个设计决定：
+
+- **命名带前缀**。`notes_add` 而不是 `add`。这是远端工具唯一的防撞手段，也让日志一眼能看出是谁提供的。
+- **权限按 annotations 映射，但不盲信**。`readOnlyHint → read`、`destructiveHint → danger`，
+  剩下的一律 `write`。**服务端说只读也可以是撒谎**，所以只读标记只是"允许自动执行"的必要条件，
+  不是"可以乱来"的许可证——真正的闸门在 `settings.allowed_levels()`。
+
+再加上一条工程约束：**一个 MCP 服务挂了不该让整个 Agent 起不来**。
+`bootstrap()` 里连不上就记下 `error`、跳过它的工具，主链路照跑；调用时崩了，
+`_make_handler` 里自动重启一次再试。因为它是独立进程，重启比重启整个服务便宜得多。
+
+`MCP_SERVERS` 的格式故意做得很土（`name=命令 参数;name2=...`）：
+环境变量里写 JSON 要转义引号，在 `.env` 和部署平台控制台里都容易写错。
+命令首位写 `python` 会被替换成 `sys.executable`——写死绝对路径换台机器就废。
+
+### 21.3 三个坑，每个都花了半小时以上
+
+**坑一：Windows 上 stdio 默认不是 UTF-8。** 子进程按 cp936 写，客户端按 UTF-8 读，
+中文一出场就是乱码，而客户端报的是"JSON 解析失败"。更阴的是**启动日志也算**：
+`print(f"[notes] 库：{DB}")` 这句在客户端看来和协议消息没区别。
+所以 `ensure_utf8()` 必须在任何 `print` 之前调用：
+
+```python
+for stream in (sys.stdin, sys.stdout, sys.stderr):
+    stream.reconfigure(encoding="utf-8", newline="\n")
+```
+
+这个 bug 只在 Windows 出现，Linux 上一切正常——所以它不会在 CI 里被发现，只会在某台机器上炸。
+
+**坑二：同步代码对接异步协议。** 官方 SDK 是 async 的，而 FastAPI 的 `def` 端点跑在线程池里（同步）。
+最省事的写法是每次调用 `asyncio.run()`，代价是每次新建事件循环 + 新建子进程（几百毫秒，
+而且子进程生命周期变脆）。改成**常驻子进程 + 一个后台读线程 + 队列**：
+
+```python
+主线程：写 stdin → 从队列里等"id 等于我这次请求"的那条响应（超时抛错，绝不死等）
+读线程：for line in proc.stdout: q.put(json.loads(line))
+```
+
+还有一个不显眼的必要动作：**stderr 必须单独收**（重定向到临时文件）。父进程不读它，
+缓冲区满了子进程就卡在 `write` 上——表现是"调用永远不返回"，看起来像死锁，其实是管道满了。
+
+**坑三（这次真的踩到了）：重启要换新队列。** kill 掉 server 后，上一代的读线程还没退干净，
+它读到 EOF 会往队列里塞一条 `{"_eof": True}`。如果新旧两代共用一个队列，
+**重启后的第一个请求会先拿到那条"死进程的遗言"**，直接判定"进程已退出"——
+现象是"刚恢复就又挂了"，而且只在特定时序复现（同一份代码，两个解释器一个过一个不过）。
+修法很简单：`start()` 里给每一代进程配一个自己的 `queue.Queue()`，并把 stream 一起作为参数传给读线程，
+老线程继续写自己的旧队列，两边互不干扰。
+
+这几条的共同点值得记：**分布式/进程间的问题，报错信息经常指向错误的方向**。
+"JSON 解析失败"其实是编码问题，"进程退出了"其实是上一代进程的遗言。
+所以定位的时候不能只看报错文本，要问"这条消息是从哪个对象、哪一代进程来的"。
+
+### 21.4 凭什么说"兼容 MCP"——用官方客户端来打自己
+
+自己写的 client 连自己写的 server，只能证明**两边一起错**。
+所以 `tools/smoke_mcp.py` 第 7 组用官方 `mcp` 包当客户端，连我们手写的 server：
+
+- ✓ 能连上（`initialize` 协商成功，`server_info` 拿得到）
+- ✓ 能列工具（`add / search / list`，`inputSchema` 完整）
+- ✓ 能调通（中文往返不乱码）
+
+这一组是"兼容"这句话唯一的证据。没装官方包时它会**明确打印"跳过"**而不是静默通过——
+这是测试脚本的基本素养：**跳过和通过必须长得不一样**，否则你永远不知道自己漏了什么。
+
+顺带一个观察：`mcp_servers/notes.py` 这个便签服务跟项目业务毫无关系——
+自己的库（`notes.db`）、自己的状态、自己的一套工具，Agent 一行代码都不知道它存在。
+它演示了工具层做不到的事：**状态在服务里，不在上下文里**。记一条便签，重启 Agent 再问，还在。
+面试时这条比"我把自己的函数包装了一遍"更有说服力。
+
+### 21.5 上线时的权限取舍
+
+工具级别从两级布尔（`TOOL_ALLOW_DANGER`）改成三级列表（`TOOL_LEVELS=read,write,danger`），
+原因很实际：公网演示需要的不是"全开/全关"，而是中间那一档——**只读全开、写操作全关**。
+
+打包脚本里把这件事做成默认（`--public`）：
+
+```python
+PUBLIC_ENV = {"TOOL_LEVELS": "read", "TOOL_ALLOW_DANGER": "0",
+              "MCP_SERVERS": "notes=python -m mcp_servers.notes", "NOTES_SEED": "1"}
+```
+
+为什么写在**打包脚本**而不是"记得改 `.env`"：本地开发需要 `run_python` 才好调试，
+一忙起来直接 `python deploy/prepare_bundle.py` 就发上去了。**默认路径必须是安全的**，要放开得显式加参数。
+
+`TOOL_LEVELS=read` 的直接后果是线上 `write` 级工具（`notes_add`）**根本不会出现在模型的工具表里**——
+`all_specs(levels)` 在拼 `tools` 参数时就把它们过滤掉了，模型连"有这个工具"都不知道，
+只会告你它没有写入能力。万一模型硬点名去调，`toolreg.call` 还有第二道：
+
+```python
+if spec.level not in levels:
+    return ToolResult(name, False, "被权限拦下",
+                      f"{name} 是 {spec.level} 级工具，本轮权限不允许调用。",
+                      error=f"{name} 属于 {spec.level} 级工具，超出本轮权限")
+```
+
+**两道闸是有意留的**：列表过滤决定"模型能看见什么"，调用校验决定"真调了会发生什么"。
+只留一道都不够——前者挡不住模型凭记忆瞎写工具名，后者挡不住模型被诱导去做无用的尝试。
+
+为了让只读演示不空洞，预置 3 条示例便签（`NOTES_SEED=1`），让 `notes_search` / `notes_list`
+有东西可查——**写不进去，读得到**，正好把"权限闸门真的在起作用"演示出来。
+
+### 21.6 自测题
+
+1. MCP 的 `notifications/initialized` 如果被误当成请求回复了一条响应，客户端会发生什么？
+2. 为什么远端工具注册进本地时要加 `前缀_`？不加会有什么具体后果？
+3. `readOnlyHint=true` 为什么不能当作"允许自动执行"的充分条件？
+4. 为什么 MCP 客户端必须单独收子进程的 stderr？不收的具体现象是什么？
+5. kill 掉 server 后立刻重启，为什么"共用队列"会导致第一个请求失败？改成什么就好了？
+6. 为什么 `ensure_utf8()` 必须在启动日志之前调用，而不是"读消息之前"？
+7. 打包脚本为什么要把安全配置写进 `--public`，而不是依赖 `.env` 里的值？

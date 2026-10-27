@@ -1,0 +1,17 @@
+# MCP 的「官方 SDK 互操作验证」依赖（app/mcp/ 本身不需要它）
+#
+# 为什么项目的 MCP 是手写的，而不是直接用官方 SDK：
+#   1. 面试要讲清协议，最快的方式是自己实现一遍——按行分隔的 JSON-RPC 2.0、
+#      initialize 版本协商、通知不回包、stdout 只能放协议消息，
+#      这几个坑不亲手踩一遍，讲出来是背课文；
+#   2. 手写版本零依赖（只有标准库），云端部署不用多装一个包。
+#
+# 那这个文件干什么：
+#   只有 tools/smoke_mcp.py 的第 7 组用例需要它——用官方 `mcp` 包当客户端，
+#   连我们自己写的 server。这是"兼容 MCP"这句话唯一的证据：
+#   自己写的 client 连自己写的 server 只能证明"两边一起错"。
+#
+# 用法：
+#   pip install -r requirements-mcp.txt
+#   python tools/smoke_mcp.py        # 没装时会跳过第 7 组并明确打出来
+mcp>=1.2

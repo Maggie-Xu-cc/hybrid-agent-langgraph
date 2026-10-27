@@ -930,13 +930,21 @@ function renderDrawer(d) {
     <div class="sec-t">工具（Agent 能做的动作）</div>
     <div class="grid2">
       ${(window.__tools && window.__tools.tools ? window.__tools.tools : []).map((x) =>
-        kv(esc(x.name), x.level === 'danger' ? '危险级' : '只读',
-           x.description ? esc(x.description.slice(0, 26)) : '')).join('')
+        kv(esc(x.name),
+           x.allowed === false ? '本轮不可用' : (x.level === 'danger' ? '危险级' : x.level === 'write' ? '会改状态' : '只读'),
+           x.allowed === false ? esc(x.level + ' 级，权限已关')
+             : (x.description ? esc(x.description.slice(0, 26)) : ''))).join('')
         || kv('工具', '未启用')}
     </div>
     <div class="note">循环上限 ${(window.__tools && window.__tools.max_steps) || '—'} 步 ·
       单次预算 ¥${(window.__tools && window.__tools.budget_cny) || '—'} ·
-      结果超 ${(window.__tools && window.__tools.result_chars) || '—'} 字自动截断</div>
+      结果超 ${(window.__tools && window.__tools.result_chars) || '—'} 字自动截断 ·
+      本轮放行 ${(window.__tools && window.__tools.levels || []).join('/') || '—'}</div>
+    <div class="note">外部工具服务（MCP）：${
+      window.__tools && window.__tools.mcp && window.__tools.mcp.count
+        ? window.__tools.mcp.count + ' 个服务 / ' + window.__tools.mcp.tools + ' 个工具（'
+          + (window.__tools.mcp.servers || []).map((s) => esc(s.name) + ' ' + (s.connected ? '已连接' : '未连接')).join('，') + '）'
+        : '未配置（只用手写工具）'}</div>
 
     <div class="sec-t">语义缓存</div>
     <div class="grid2">

@@ -98,10 +98,17 @@ def openai_tools(levels: tuple[str, ...] = LEVELS) -> list[dict]:
     return [s.openai_spec() for s in all_specs(levels)]
 
 
-def describe() -> list[dict]:
-    """给页面/调试用的工具清单（不含 handler）。"""
+def describe(levels: tuple[str, ...] | None = None) -> list[dict]:
+    """给页面/调试用的工具清单（不含 handler）。
+
+    `allowed` 标记"这一轮实际放不放行"。为什么不直接把用不了的过滤掉：
+    页面要能看见"有这个工具，但现在被权限挡着"——这比它凭空消失更能说明
+    闸门在起作用（模型那侧拿到的 `tools` 参数才是过滤后的，两者故意的）。
+    """
+    allow = LEVELS if levels is None else levels
     return [{"name": s.name, "description": s.description, "level": s.level,
-             "parameters": s.parameters} for s in all_specs()]
+             "parameters": s.parameters, "allowed": s.level in allow}
+            for s in all_specs()]
 
 
 # ---------------------------------------------------------------- 参数校验
