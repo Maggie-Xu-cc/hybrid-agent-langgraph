@@ -48,8 +48,11 @@ def make_runner(engine: str):
             # 避免上一条用例的对话历史污染下一条（否则成本/答案都不可比）。
             # use_cache=False：评测要测的是路由/模型链路本身，缓存命中会把
             # 同义用例的成本拉成 0，让对照实验失去意义。
+            # use_rag=False：理由同缓存——测试集是通用问答，不查项目文档；
+            # 开着检索会让 graph 链路比 plain 多拿一段参考资料，两条链路的
+            # 回答差异就不再是"编排方式"造成的，一致性对比失效。
             return run_graph(query, session_id=f"eval-{uuid.uuid4().hex}",
-                             force_route=force, use_cache=False)
+                             force_route=force, use_cache=False, use_rag=False)
 
         return _run
 

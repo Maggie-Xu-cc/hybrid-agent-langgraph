@@ -2,10 +2,10 @@
 
 一个**成本感知的混合推理 Agent**：本地小模型处理简单请求，复杂请求自动升级到云端大模型，并把每次调用的 Token、延迟、成本都记下来。
 
-> 主流程用 LangGraph `StateGraph` 编排，带会话记忆与可切换的双链路（图编排 / 显式流程）对照评测。
+> 主流程用 LangGraph `StateGraph` 编排，带会话记忆、语义缓存、RAG 检索与可切换的双链路（图编排 / 显式流程）对照评测。
 > 核心不是"又一个聊天机器人"，而是回答一个问题：**在什么条件下，自建小模型 + 云端兜底比全部走 API 更划算？**
 >
-> 三级降本思路：**语义缓存命中（0 成本）→ 规则层拦下大部分请求（0 成本）→ 本地小模型承接简单请求（低）→ 云端大模型只处理真正难的（高）**。
+> 成本与质量两条线同时管：**语义缓存命中（0 成本）→ 检索资料（0 成本，决定答得准不准）→ 规则层拦下大部分请求（0 成本）→ 本地小模型承接简单请求（低）→ 云端大模型只处理真正难的（高）**。
 
 ## 在线试用
 
@@ -50,15 +50,17 @@
 主流程迁移到 LangGraph `StateGraph`（`app/graph.py`），行为与原显式流程（`app/agent.py`，保留为基线）完全一致：
 
 ```
-START ─▶ load_memory ─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
-                              │                               │                        │
-                              └──hard──▶ cloud_answer         └─通过─▶ bookkeep ─▶ save_memory ─▶ END
-                                         (cloud_answer ─────────────▶ bookkeep)
+START ─▶ load_memory ─▶ cache_lookup ─命中─▶ bookkeep ─▶ save_memory ─▶ END
+                             │
+                             └未命中─▶ retrieve ─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
+                                                      │                                │                         │
+                                                      └──hard──▶ cloud_answer          └─通过─▶ bookkeep ◀───────┘
+                                                                 (cloud_answer ─────────────────▶ bookkeep)
 ```
 
 - 路由逻辑 `router.decide()` 原样保留，从"函数调用"变成**条件边**；记账集中在 `bookkeep` 节点
 - **会话记忆（短期）**：`SqliteSaver` checkpointer 按 `session_id` 持久化对话状态（`checkpoints.db`），天然支持多轮对话
-- 双链路可切换：`ENABLE_LANGGRAPH=1/0`，两条链路跑同一份评测集可做对比实验
+- **双链路可切换**：`ENABLE_LANGGRAPH=1/0`，两条链路跑同一份评测集可做对比实验
 - 冒烟测试（离线）：`python tools/smoke_langgraph.py`
 
 ### 上下文工程（v1.2）
@@ -121,6 +123,48 @@ system 人设（必留）＋ 长期记忆事实（≤200 tok）＋ 早前摘要�
 ```
 
 前端每个浏览器会话自动生成 `session_id`（存 `localStorage`，刷新不丢），页面上的「新会话」按钮换 id 即隔离上下文；后端不传时默认 `default`。
+
+### RAG 检索（v1.6）
+
+`app/rag.py` 补上「上下文工程」缺的那一环：前面几版解决的是"预算怎么分"，但没有**检索**——
+模型不知道你的文档里写了什么，问"这个项目的缓存阈值怎么定的"只能编。现在链路完整了：
+
+```
+语义缓存(¥0) ─▶ 检索(¥0) ─▶ 规则路由(¥0) ─▶ 本地小模型 ─▶ 云端大模型
+                  │
+                  └ 命中则把片段注入 prompt 的「参考资料」块（上限 500 token）
+```
+
+四步流程，每步的取舍都能单独讲：
+
+1. **切块**：按 markdown 标题分节（作者自己划的语义边界，比定长滑窗准），节内按段落聚合到 450 字。太短的块（<80 字）不入库——全是噪声
+2. **召回**：BM25（中文按字符 bigram，去停用词）+ 向量余弦两路
+3. **排序**：BM25 归一化 85% + 向量 15%
+4. **过滤**：BM25 绝对门槛 + 命中词项数 ≥2 + 命中至少一个关键项 + 相对分数截断
+
+**这里有一段实测驱动的设计修正，比功能本身更值得说：**
+
+初版用的是工业界默认的 RRF 融合（两路排名倒数相加）。跑出来是错的——问"缓存阈值是怎么定下来的"，BM25 正确地把 `§13.3` 排第一（13.79 分），但融合后第一名变成了一块 BM25=0 的无关块。根因：RRF 假设两路都有判别力，而 **n-gram 向量在"短查询 vs 长文档块"场景下没有判别力**——查询只有 8 个 bigram，文档块有几百个，归一化后点积被长块的主导维度稀释，分数全挤在 0.25~0.5 的窄带里（实测相关 0.30~0.51、无关 0.27~0.40，完全重叠）。所以改成显式加权，向量只保留 tiebreaker 的角色。
+
+第二个坑：**IDF 最高的词不一定是"重要"，可能是"从没出现过的垃圾"**。问"SQLiteSaver 为什么会报 readonly"，中文部分切出"么会""会报"两个跨词边界碎片，它们在语料里一次都没出现，IDF 冲到最高被当成关键项，而真正该命中的 `readonly` 反而被排除 —— 这条查询直接漏召。改成按 **DF**（出现次数）判断且排除 DF=0：DF=0 不是"区分度高"，是"不存在"。
+
+两个坑的共同点：**都是"以为标准做法能用"导致的，靠实测才发现**。
+
+实测效果（148 块知识库，16 条查询）：
+
+| 指标 | 结果 |
+|---|---|
+| 相关查询召回 | 9/9 |
+| 无关查询拒绝 | 4/7（"今天天气"这类误召回，文档里恰好有该短语，靠提示词「不相关就忽略」兜底） |
+| 检索耗时 | 30~35 ms（148 块线性扫描） |
+| 命中时注入 | 2~4 段，约 300~500 token |
+
+为什么不接 sqlite-vec / Chroma：和缓存同一个判断——几百到几千块的线性扫描是毫秒级，不值得引依赖；`embed()` 是独立函数，换真 embedding 模型只改它一处。边界也清楚：**向量路现在的贡献接近零，换成真 embedding 后才会明显，那时再调融合权重**。
+
+- `python tools/build_kb.py` → 建/更新索引（改完 docs 要重跑）
+- `GET /api/kb` → 知识库概况；`POST /api/kb/rebuild` → 重建
+- 冒烟测试（离线，44 项断言）：`python tools/smoke_rag.py`
+- 有检索结果时**不写语义缓存**——答案依赖知识库内容，改了文档缓存就过期
 
 ### 历史会话可以切回去
 
@@ -346,7 +390,8 @@ app/
   agent.py     基线主流程（显式三步，ENABLE_LANGGRAPH=0 时使用）
   graph.py     LangGraph 编排主流程（默认）：缓存查找 + 条件边 + 自检升级 + 记账 + 会话记忆
   cache.py     语义缓存：n-gram 向量相似度匹配（插在路由之前）
-  context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/摘要/历史）
+  rag.py       RAG 检索：markdown 切块 + BM25/向量双路召回 + 分数截断
+  context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/检索/摘要/历史）
   memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
   store.py     SQLite 记录与统计（含分层追踪 by_layer）
   dbutil.py    SQLite 连接参数 + 忙/只读重试（重试贴着 SQL，不重跑模型）
@@ -362,9 +407,11 @@ tools/
   capacity_plan.py   算力需求测算（三阶段预算）
   bench_throughput.py 并发压测（测单卡 tok/s）
   cache_bench.py      语义缓存基准（命中率/成本对比，--mock 可离线，--workers 并发）
+  build_kb.py         构建 RAG 知识库索引（改完 docs 要重跑）
   smoke_langgraph.py  LangGraph 链路冒烟测试（离线）
   smoke_memory.py     记忆与上下文冒烟测试（离线，26 项断言）
   smoke_cache.py      语义缓存冒烟测试（离线，36 项断言）
+  smoke_rag.py        RAG 检索冒烟测试（离线，44 项断言）
   smoke_breaker.py    本地熔断器冒烟测试（离线，17 项断言）
 deploy/
   local_server.py    本地模型服务（transformers + 标准库 HTTP，无 vLLM 的机器用）

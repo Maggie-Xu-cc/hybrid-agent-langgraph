@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import cache, guard, memory, store
+from . import cache, guard, memory, rag, store
 from .agent import run
 from .clients import local_breaker
 from .config import settings
@@ -46,6 +46,16 @@ def _startup() -> None:
     if settings.enable_cache:
         cache.init()
         cache.purge_expired()   # 启动时清一次过期条目，之后命中时也会顺带跳过
+    if settings.enable_rag:
+        rag.init()
+        # 知识库为空时只警告不阻塞：检索层设计成"没有资料就静默退化"，
+        # 服务照常可用。但必须打出来，否则用户会以为 RAG 在工作而实际没有。
+        st = rag.stats()
+        if st["chunks"] == 0:
+            print("[warn] 知识库为空，RAG 检索不会生效。"
+                  "先跑：python tools/build_kb.py", flush=True)
+        else:
+            print(f"[rag] 知识库就绪：{st['docs']} 篇 / {st['chunks']} 块", flush=True)
 
 
 @app.middleware("http")
@@ -117,6 +127,9 @@ def api_chat(body: ChatIn) -> dict:
 def api_stats() -> dict:
     return {"summary": store.stats(), "recent": store.recent(8),
             "cache": cache.stats() if settings.enable_cache else None,
+            # 知识库状态：搜了几篇、多少块。为空说明没建索引，检索层在空转
+            "kb": ({"enabled": True, **rag.stats()} if settings.enable_rag
+                   else {"enabled": False}),
             # 本地熔断状态：本地模型挂了时页面能看到"已短路"，不至于以为卡死
             "local_breaker": local_breaker.state(),
             # 本地模型层是否启用。云端部署时一定是 False——页面据此说明
@@ -141,6 +154,26 @@ def api_cache_stats() -> dict:
 def api_cache_clear() -> dict:
     """清空语义缓存（不影响记账和会话记忆）。"""
     return {"deleted": cache.clear(), "summary": cache.stats()}
+
+
+@app.get("/api/kb")
+def api_kb_stats() -> dict:
+    """知识库概况：多少篇、多少块、最后更新时间。"""
+    return {"enabled": settings.enable_rag,
+            "top_k": settings.rag_top_k,
+            "bm25_min": settings.rag_bm25_min,
+            "dirs": settings.kb_dirs,
+            **rag.stats()}
+
+
+@app.post("/api/kb/rebuild")
+def api_kb_rebuild() -> dict:
+    """重建索引。改了 docs/ 里的文档之后调它，否则检索用的还是旧快照。"""
+    if not settings.enable_rag:
+        raise HTTPException(400, "RAG 未启用（ENABLE_RAG=0）")
+    dirs = [d.strip() for d in settings.kb_dirs.split(",") if d.strip()]
+    r = rag.index_dirs(dirs, Path.cwd())
+    return {"rebuilt": r, "summary": rag.stats()}
 
 
 @app.get("/api/sessions")

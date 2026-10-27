@@ -64,6 +64,12 @@
   .meta { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 10px 0 14px; }
   .meta b { color: var(--text); font-weight: 500; }
   .answer { white-space: pre-wrap; font-size: 14px; }
+  .rag { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .rag-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .rag-item { font-size: 12px; color: var(--muted); padding: 4px 0 4px 10px;
+    border-left: 2px solid var(--line); margin-bottom: 4px; }
+  .rag-item b { color: var(--text); font-weight: 500; }
+  .rag-item .src { color: var(--accent); }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
   .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
   .stat .k { font-size: 11px; color: var(--muted); }
@@ -145,6 +151,10 @@
       <span>引擎 <b id="engine"></b></span>
     </div>
     <div class="answer" id="answer"></div>
+    <div class="rag hidden" id="rag">
+      <div class="rag-title">参考资料 <span id="rag-count" class="sub" style="margin:0"></span></div>
+      <div id="rag-list"></div>
+    </div>
   </div>
 
   <div class="stats">
@@ -374,6 +384,23 @@ async function send() {
     $('saved').textContent = (saved * 100).toFixed(0) + '%';
     $('answer').textContent = d.answer || '(空回答)';
     $('engine').textContent = d.engine || '-';
+
+    // 检索来源：命中时列出实际参考了哪几段。这是"答案不是编的"的唯一证据，
+    // 所以要把出处和分数一起亮出来，而不是只说"用了 RAG"。
+    const rg = d.rag || {};
+    if (rg.hit && rg.chunks && rg.chunks.length) {
+      $('rag').classList.remove('hidden');
+      $('rag-count').textContent =
+        `${rg.chunks.length} 段 · 检索 ${rg.latency_ms || 0}ms · 注入 ${(d.memory?.ctx_tokens?.rag) || 0} token`;
+      $('rag-list').innerHTML = rg.chunks.map((c) => `
+        <div class="rag-item">
+          <span class="src">${c.doc}${c.heading ? ' § ' + c.heading : ''}</span>
+          <b> 相关度 ${c.score}</b> <span class="sub" style="margin:0">BM25 ${c.bm25}</span>
+        </div>`).join('');
+    } else {
+      $('rag').classList.add('hidden');
+    }
+
     // 上下文工程可观测：本轮注入/记住了什么
     const mem = d.memory || {};
     let memNote = [];

@@ -44,7 +44,7 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from . import cache, context, memory, store
+from . import cache, context, memory, rag, store
 from .dbutil import with_retry
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
@@ -102,6 +102,10 @@ class AgentState(TypedDict, total=False):
     cache_hit: bool  # 语义缓存是否命中（cache_lookup 节点判定）
     cache_score: float  # 命中时的相似度
     use_cache: bool  # 本轮是否启用缓存（评测时关掉，避免污染对照实验）
+    rag_chunks: list  # 检索到的相关片段（retrieve 节点，注入 prompt 用）
+    rag_hit: bool  # 本轮是否检索到资料
+    rag_stats: dict  # 检索统计（条数、耗时、来源、最高分）
+    use_rag: bool  # 本轮是否启用检索（评测/对照实验可关）
     started: float
     result: dict
 
@@ -113,13 +117,14 @@ def _needs_escalation(text: str) -> bool:
 
 
 def _build_messages(state: AgentState, query: str) -> tuple[list[dict], dict]:
-    """按 token 预算组装 prompt：system + 记忆 + 摘要 + 最近历史 + 本轮提问。"""
+    """按 token 预算组装 prompt：system + 记忆 + 检索资料 + 摘要 + 历史 + 提问。"""
     return context.build_messages(
         system=SYSTEM,
         facts=state.get("facts") or {},
         summary=state.get("summary") or "",
         history=state.get("history") or [],
         query=query,
+        rag_chunks=state.get("rag_chunks") or [],
     )
 
 
@@ -169,6 +174,40 @@ def cache_lookup_node(state: AgentState) -> dict:
         "cloud_out": 0,
         "escalated": False,
         "degraded": False,
+    }
+
+
+def retrieve_node(state: AgentState) -> dict:
+    """RAG 检索：从本地知识库召回相关片段，供 route 组 prompt 时注入。
+
+    为什么放在"缓存未命中之后、路由之前"：
+    - 缓存命中时已经是答案了，检索纯属浪费；
+    - route 节点要组装 messages，检索结果必须在那之前就位。
+
+    失败不阻塞：知识库没建、表不存在、内容为空，一律退化为"没有资料的普通问答"，
+    和没上 RAG 时行为完全一致。检索是增强，不是链路的前提。
+    """
+    started = time.perf_counter()
+    if not state.get("use_rag", settings.enable_rag):
+        return {"rag_chunks": [], "rag_hit": False, "rag_stats": {"n": 0, "enabled": False}}
+    try:
+        chunks = rag.search(state["query"])
+    except Exception as exc:   # noqa: BLE001 — 检索挂了也不能让整条请求挂
+        chunks = []
+        err = f"{type(exc).__name__}: {exc}"
+    else:
+        err = ""
+    return {
+        "rag_chunks": chunks,
+        "rag_hit": bool(chunks),
+        "rag_stats": {
+            "enabled": True,
+            "n": len(chunks),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "top_score": chunks[0]["score"] if chunks else 0.0,
+            "sources": [f"{c['doc']} § {c['heading']}" for c in chunks],
+            "error": err,
+        },
     }
 
 
@@ -314,6 +353,7 @@ def bookkeep_node(state: AgentState) -> dict:
         state.get("use_cache", settings.enable_cache)
         and not state.get("cache_hit")
         and not pre_history
+        and not state.get("rag_hit")   # 答案依赖知识库内容：改了文档缓存就过期，不能复用
         and bool(state.get("answer"))
         and (route["difficulty"] == "easy" or settings.cache_cache_hard)
     )
@@ -399,6 +439,16 @@ def bookkeep_node(state: AgentState) -> dict:
             "summarized_now": summarized,
             "ctx_tokens": state.get("ctx_stats") or {},
         },
+        # 检索的可观测性：命了几段、来自哪个文档、最高分多少、耗时
+        "rag": {
+            **(state.get("rag_stats") or {"enabled": False, "n": 0}),
+            "hit": bool(state.get("rag_hit")),
+            "chunks": [
+                {"doc": c["doc"], "heading": c["heading"],
+                 "score": c["score"], "bm25": c["bm25"], "vec": c["vec"]}
+                for c in (state.get("rag_chunks") or [])
+            ],
+        },
     }
     return {"history": history, "summary": summary, "result": result}
 
@@ -443,6 +493,7 @@ def build_graph(checkpointer=None):
     g = StateGraph(AgentState)
     g.add_node("load_memory", load_memory_node)
     g.add_node("cache_lookup", cache_lookup_node)
+    g.add_node("retrieve", retrieve_node)
     g.add_node("route", route_node)
     g.add_node("local_answer", local_answer_node)
     g.add_node("cloud_answer", cloud_answer_node)
@@ -454,8 +505,9 @@ def build_graph(checkpointer=None):
     g.add_edge(START, "load_memory")
     g.add_edge("load_memory", "cache_lookup")
     g.add_conditional_edges("cache_lookup", after_cache, {
-        "hit": "bookkeep", "miss": "route",
+        "hit": "bookkeep", "miss": "retrieve",
     })
+    g.add_edge("retrieve", "route")
     g.add_conditional_edges("route", after_route, {
         "easy": "local_answer", "hard": "cloud_answer",
     })
@@ -554,6 +606,7 @@ def run_graph(query: str, session_id: str = "default",
               force_route: str | None = None,
               user_id: str = "",
               use_cache: bool | None = None,
+              use_rag: bool | None = None,
               checkpoint_db: str | None = None) -> dict:
     """对外入口：与 agent.run() 返回字段完全一致。
 
@@ -561,6 +614,8 @@ def run_graph(query: str, session_id: str = "default",
     user_id     → 长期记忆（跨会话的用户事实，SQLite user_facts 表）
     use_cache   → 语义缓存开关；None = 跟随全局配置。评测时显式传 False，
                   否则同义用例第二次出现会命中缓存，污染对照实验。
+    use_rag     → 检索开关；None = 跟随全局配置。做"有无 RAG"对照实验时显式传值，
+                  否则两组结果不具有可比性。
     checkpoint_db → 会话状态落到哪个库；默认用主库。并发基准传独立文件，
                   避免多线程争抢同一个 sqlite 的 WAL 文件。
     两个记忆键独立：新会话不会忘掉用户，新身份不会读到别人的会话。
@@ -573,7 +628,8 @@ def run_graph(query: str, session_id: str = "default",
     config = {"configurable": {"thread_id": session_id}}
     out = app.invoke(
         {"query": query, "force_route": force_route, "user_id": user_id,
-         "use_cache": settings.enable_cache if use_cache is None else use_cache},
+         "use_cache": settings.enable_cache if use_cache is None else use_cache,
+         "use_rag": settings.enable_rag if use_rag is None else use_rag},
         config,
     )
     return out["result"]

@@ -57,6 +57,20 @@ class Settings:
     cache_ttl_days: int = int(os.getenv("CACHE_TTL_DAYS", "7"))
     cache_cache_hard: bool = os.getenv("CACHE_CACHE_HARD", "0") == "1"
 
+    # RAG 检索（app/rag.py）：从本地文档召回相关片段注入 prompt
+    # bm25_min 是实测校准的门槛：相关问题量产出的 BM25 最高分在 6~23，无关问题在 0~5
+    # （"今天天气"例外地到 8.4，因为文档里恰好用它举例——这类误召回靠提示词
+    #  "不相关就忽略"兜底，不靠调阈值，调高会把真召回一起误伤）
+    enable_rag: bool = os.getenv("ENABLE_RAG", "1") == "1"
+    rag_top_k: int = int(os.getenv("RAG_TOP_K", "4"))
+    rag_bm25_min: float = float(os.getenv("RAG_BM25_MIN", "5.0"))
+    # 相对分数截断：低于"第一名分数 × 这个系数"的候选丢掉。
+    # 固定 top_k 的问题是它不管你检索得好不好，一律塞满 4 条——
+    # 第一名 0.87、第三名 0.43 的时候，那两条弱相关只会稀释模型注意力。
+    rag_rel_cutoff: float = float(os.getenv("RAG_REL_CUTOFF", "0.55"))
+    rag_budget: int = int(os.getenv("RAG_BUDGET", "500"))  # 注入 prompt 的 token 配额
+    kb_dirs: str = os.getenv("KB_DIRS", "docs")
+
     # 1 = 走 LangGraph 编排（app/graph.py）；0 = 走原来的显式流程（app/agent.py）
     # graph.py 导入失败（未装 langgraph）时 server.py 会自动回退
     enable_langgraph: bool = os.getenv("ENABLE_LANGGRAPH", "1") == "1"
