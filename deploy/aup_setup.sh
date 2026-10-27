@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # AUP 环境自检 + 准备：在 AUP 的 Terminal 里跑一次，把"该装什么、缺什么"一次说清。
-#
+
+# 防呆：在 Windows 上编辑过（或从 Windows 打包上传）的脚本会带 CRLF，
+# Linux 上 bash 会报 $'\r': command not found，看起来像脚本坏了。
+# 检测必须用 head -c 读原始字节：Git Bash 的 sed/grep 会按文本模式自动吞掉 CR，
+# 用它们探测永远测不出带不带 CR（这里踩过一次，白试了两轮）。
+if head -c 200 "$0" | od -c | grep -q '\\r'; then
+  echo "检测到 Windows 换行符（CRLF），自动修正后重跑..."
+  sed -i 's/\r$//' "$0" && exec bash "$0" "$@"
+fi
+
 # 用法（项目根目录）：
 #   bash deploy/aup_setup.sh              # 只检查，不动环境
 #   bash deploy/aup_setup.sh --install    # 缺什么装什么（pip 走清华镜像）
@@ -22,7 +31,7 @@ for arg in "$@"; do
   case "$arg" in
     --install) DO_INSTALL=1 ;;
     --predownload) DO_PREDL=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed '1d' | head -16; exit 0 ;;
     *) echo "未知参数：$arg（可用：--install / --predownload）"; exit 2 ;;
   esac
 done
