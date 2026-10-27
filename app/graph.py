@@ -156,14 +156,20 @@ def cache_lookup_node(state: AgentState) -> dict:
     重建过索引就自动失效。原来的做法是一律不缓存检索过的答案，结果缓存几乎不工作。
     """
     if not state.get("use_cache", settings.enable_cache):
-        return {"cache_hit": False}
+        # 三个缓存字段一律显式清零。**不能只返回 cache_hit**：
+        # 同一个 session_id 的第二轮会拿到上一轮攒下的 state（checkpointer 回放），
+        # 上一轮命中过、分数 0.969，这轮没查缓存却照样把 0.969 带出去——
+        # 页面就会显示"命中 0.969"而实际走的是云端，是最难查的那种假数据。
+        return {"cache_hit": False, "cache_score": 0.0, "cache_top_score": 0.0,
+                "cache_blocked": "", "cache_blocked_text": ""}
     look = cache.lookup_ex(state["query"], kb_version=rag.version())
     hit = look["hit"]
     if not hit:
         # 没命中也要把"本来差点命中、被门卫拦下"带出去：
         # 图上要能看见"相似度 0.906 但数字不同，所以拒绝复用"，
         # 否则页面只会显示"走了云端"，看不出系统刚避免了一次错答。
-        return {"cache_hit": False, "cache_blocked": look.get("blocked", ""),
+        return {"cache_hit": False, "cache_score": 0.0,
+                "cache_blocked": look.get("blocked", ""),
                 "cache_blocked_text": look.get("blocked_text", ""),
                 "cache_top_score": look.get("score", 0.0)}
     return {

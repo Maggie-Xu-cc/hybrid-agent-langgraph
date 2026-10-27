@@ -150,7 +150,16 @@ def check(query: str, cached: str) -> tuple[bool, str]:
         # 是同一个问题的两种说法，不该判成冲突。
         loose = (not nq or not nc) and (nq <= {"1"} and nc <= {"1"})
         if not loose:
-            return False, f"数字不同：{sorted(nq) or '无'} vs {sorted(nc) or '无'}"
+            # 只报差在哪边。把两边全集都列出来（"['0','1','2','8'] vs ['1','2']"）
+            # 会让人以为连 1、2 都冲突了，而这两边都有的数字恰恰不构成区别。
+            extra = sorted(nq - nc)
+            lost = sorted(nc - nq)
+            bits = []
+            if extra:
+                bits.append("问题里多 " + "/".join(extra))
+            if lost:
+                bits.append("缓存里多 " + "/".join(lost))
+            return False, "数字不同（" + "；".join(bits) + "）"
 
     uq, uc = _units(query), _units(cached)
     # 查询可以少说单位（「3:15 PM 换 24 小时制」没说分钟），但不能说了别的单位
