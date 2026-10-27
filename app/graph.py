@@ -305,12 +305,13 @@ def bookkeep_node(state: AgentState) -> dict:
     # ---- 语义缓存写入：把这份答案存起来，下次相似问题就能 0 成本复用 ----
     # 只存"首轮独立问题"：多轮问题依赖会话上下文，换会话直接复用会答错。
     # hard 默认不存（质量敏感+重复率低），CACHE_CACHE_HARD=1 可打开。
+    # 注意不排除 degraded：降级只是换了provider（本地挂了走云端），答案本身是好的；
+    # 若排除，本地模型一挂缓存就彻底不工作——恰是最需要省钱的时候失效，不合理。
     pre_history = state.get("history") or []
     cache_writable = (
         state.get("use_cache", settings.enable_cache)
         and not state.get("cache_hit")
         and not pre_history
-        and not state.get("degraded")
         and bool(state.get("answer"))
         and (route["difficulty"] == "easy" or settings.cache_cache_hard)
     )

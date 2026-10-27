@@ -158,6 +158,17 @@ python -m uvicorn app.server:app --host 0.0.0.0 --port 8080
 
 `MOCK_MODE=1` 可以完全离线跑通（不需要 GPU、不需要 Key），用于先联调页面与记账逻辑。
 
+**本地模型三种起法**（都走 OpenAI 兼容协议，改 `.env` 即可切换）：
+
+| 场景 | LOCAL_BASE_URL | LOCAL_MODEL |
+|---|---|---|
+| 本机 Ollama（最省事） | `http://127.0.0.1:11434/v1` | `ollama list` 里的模型名，如 `qwen:latest` |
+| 云 GPU vLLM | `http://127.0.0.1:8000/v1` | `Qwen2.5-7B-AWQ`（与 `--served-model-name` 一致） |
+| 无本地模型 | 指向一个没人监听的端口 | 无所谓 |
+
+最后一行是"纯云端模式"：本地连不上会自动降级到云端（`degraded=true`），链路照样跑通，
+只是成本与延迟按云端算——适合只验证逻辑、或者本地机器扛不住的时候。
+
 打开 http://localhost:8080 即可对话。页面会实时显示本次请求走了哪条路、花了多少钱、比全云端省了多少。
 
 本地模型的部署（AMD ROCm + transformers 自建 OpenAI 兼容服务）见 [docs/deploy.md](docs/deploy.md)。
