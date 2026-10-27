@@ -125,18 +125,20 @@ def init() -> None:
 
 
 @with_retry
-def lookup(query: str, threshold: float | None = None,
-           kb_version: str | None = None) -> dict | None:
-    """查缓存。返回 {"answer","model","difficulty","score","hits"} 或 None。
+def lookup_ex(query: str, threshold: float | None = None,
+              kb_version: str | None = None) -> dict:
+    """查缓存，并把"为什么没命中"也一起返回。
 
-    两段式：先 hash 精确匹配（O(1)），再相似度线性扫描（量级小，毫秒级）。
-    过期条目（超过 TTL）一律不返回——答案可能已经过时，比如"今天天气"。
+    只返回 None 的话，"被门卫拦下"和"压根没有相似条目"在外部看来一模一样——
+    而这两件事的含义完全相反：前者说明系统刚刚防止了一次错误回答，后者只是没省钱。
+    这个区别是页面演示里最有价值的一处，所以必须带出来。
 
-    kb_version：当前知识库版本（rag.version()）。传了就只认同一版本下生成的条目，
-    传 None 表示不校验（评测/实验用——它们要的是纯粹的相似度行为）。
+    返回 {"hit": dict|None, "score": 最高相似度, "blocked": 拒绝原因,
+          "blocked_text": 被拦下的那条缓存原文}
     """
+    miss = {"hit": None, "score": 0.0, "blocked": "", "blocked_text": ""}
     if not query or not settings.enable_cache:
-        return None
+        return miss
     threshold = threshold if threshold is not None else effective_threshold()
     q_hash = _hash_query(query)
     now = time.time()
@@ -148,14 +150,14 @@ def lookup(query: str, threshold: float | None = None,
             " hits, updated_at, embed_model, kb_version, cost_cny FROM semantic_cache"
         ).fetchall()
     except sqlite3.OperationalError:   # 表还没建
-        return None
+        return miss
     finally:
         conn.close()
 
     cur_model = embedder.name()
     ttl = settings.cache_ttl_days * 86400
     best_score, best_row, best_hash = 0.0, None, ""
-    guarded_out = ""
+    guarded_out, guarded_text, guarded_score = "", "", 0.0
     for (r_hash, emb_json, query_text, answer, model, difficulty,
          hits, updated_at, emb_model, kb_ver, row_cost) in rows:
         # 换过向量后端：256 维和 512 维算出来的余弦毫无意义，整条跳过。
@@ -184,20 +186,26 @@ def lookup(query: str, threshold: float | None = None,
             break
 
         score = _cosine(embed(query), json.loads(emb_json))
-        if score <= best_score:
+        # 先过分数线，再过守卫。顺序不能反：
+        # 反过来的话，一个相似度只有 0.12 的无关条目也会被守卫"拒绝"，
+        # 于是页面把"压根不像"误报成"门卫拦下了一次危险复用"——这属于编故事。
+        # 只有"本来会命中、但参数不同"才配叫拦截。
+        if score < threshold or score <= best_score:
             continue
-        # 过了分数线还不算：向量只说"讲的是同一件事"，不说"参数也一样"。
-        # 3点15/3点45 余弦能到 0.97，靠这一步拦。
         if settings.cache_guard:
             ok, why = cacheguard.check(query, query_text)
             if not ok:
-                guarded_out = why
+                # 记下最高分的那条被拦候选，用于展示"0.906 却没复用"
+                if score > guarded_score:
+                    guarded_score = score
+                guarded_out, guarded_text = why, query_text
                 continue
         best_score, best_hash = score, r_hash
         best_row = (answer, model, difficulty, hits, row_cost)
 
-    if best_row is None or best_score < threshold:
-        return None
+    if best_row is None:
+        return {"hit": None, "score": max(best_score, guarded_score),
+                "blocked": guarded_out, "blocked_text": guarded_text}
 
     answer, model, difficulty, hits, saved_cost = best_row
     conn = sqlite3.connect(settings.db_path, timeout=10)
@@ -209,12 +217,26 @@ def lookup(query: str, threshold: float | None = None,
             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), best_hash),
         )
     conn.close()
-    return {"answer": answer, "model": model, "difficulty": difficulty,
-            "score": best_score, "hits": hits + 1,
-            # 这条答案当初生成的成本：命中时成本记 0，基线要按它算，否则"省了多少"看不出来
-            "cost": float(saved_cost or 0.0),
-            "guard": "pass" if guarded_out else "",
-            "guard_blocked": guarded_out}
+    return {"hit": {"answer": answer, "model": model, "difficulty": difficulty,
+                    "score": best_score, "hits": hits + 1,
+                    # 这条答案当初生成的成本：命中时成本记 0，基线要按它算，否则"省了多少"看不出来
+                    "cost": float(saved_cost or 0.0),
+                    "guard": "pass" if guarded_out else "",
+                    "guard_blocked": guarded_out},
+            "score": best_score, "blocked": guarded_out, "blocked_text": guarded_text}
+
+
+def lookup(query: str, threshold: float | None = None,
+           kb_version: str | None = None) -> dict | None:
+    """查缓存，只要结果。返回 {"answer","model","difficulty","score","hits"} 或 None。
+
+    两段式：先 hash 精确匹配（O(1)），再相似度线性扫描（量级小，毫秒级）。
+    过期条目（超过 TTL）一律不返回——答案可能已经过时，比如"今天天气"。
+
+    kb_version：当前知识库版本（rag.version()）。传了就只认同一版本下生成的条目，
+    传 None 表示不校验（评测/实验用——它们要的是纯粹的相似度行为）。
+    """
+    return lookup_ex(query, threshold, kb_version)["hit"]
 
 
 @with_retry

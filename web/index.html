@@ -3,552 +3,951 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>混合推理 Agent Demo</title>
+<title>混合推理 Agent · 路由演示</title>
 <style>
   :root {
-    --bg: #faf9f6;
-    --card: #ffffff;
+    --bg: #ffffff;
+    --side: #f6f5f2;
     --line: #e6e3dc;
+    --line-soft: #efece6;
     --text: #22221f;
-    --muted: #7c7a73;
+    --muted: #86837a;
     --easy: #0f6e56;
     --easy-bg: #e1f5ee;
     --hard: #854f0b;
     --hard-bg: #faeeda;
     --accent: #534ab7;
+    --accent-bg: #eeecfa;
+    --guard: #a32d2d;
+    --guard-bg: #fdeceb;
+    --guard-line: #f3c9c6;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
+    margin: 0; display: flex; overflow: hidden;
+    background: var(--bg); color: var(--text);
     font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    line-height: 1.65; padding: 32px 20px 64px;
+    line-height: 1.65; font-size: 15px;
   }
-  .wrap { max-width: 780px; margin: 0 auto; }
-  h1 { font-size: 19px; font-weight: 600; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
-  .card {
-    background: var(--card); border: 1px solid var(--line);
-    border-radius: 12px; padding: 18px;
+  button { font: inherit; cursor: pointer; }
+
+  /* ---------------- 左侧会话栏 ---------------- */
+  .side {
+    width: 264px; flex: 0 0 264px; background: var(--side);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
   }
-  textarea {
-    width: 100%; min-height: 84px; resize: vertical; font: inherit;
-    padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
-    background: #fdfcfa; color: var(--text); outline: none;
+  .brand { padding: 16px 16px 10px; }
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .brand .tag { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .newchat {
+    margin: 4px 12px 10px; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid #d8d4cb; background: #fff; color: var(--text);
+    display: flex; align-items: center; gap: 8px; font-size: 13.5px;
+    transition: border-color .15s, box-shadow .15s;
   }
-  textarea:focus { border-color: #c9c4f0; }
-  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
-  button {
-    font: inherit; cursor: pointer; border-radius: 8px;
-    border: 1px solid var(--line); background: #fff; color: var(--text);
-    padding: 6px 14px;
+  .newchat:hover { border-color: #b9b3a7; box-shadow: 0 1px 4px rgba(0,0,0,.05); }
+  .newchat .plus { color: var(--accent); font-weight: 600; font-size: 15px; }
+  .side-label {
+    font-size: 11px; color: var(--muted); padding: 6px 16px 4px;
+    display: flex; justify-content: space-between;
   }
-  button.primary {
-    background: var(--accent); border-color: var(--accent); color: #fff;
-    padding: 8px 20px; font-weight: 500;
+  .sess-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; min-height: 0; }
+  .sess {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+    border-radius: 9px; cursor: pointer; font-size: 13px;
+    color: #3d3b35; border: 1px solid transparent; margin-bottom: 2px;
   }
-  button.ghost { font-size: 12px; padding: 4px 10px; color: var(--muted); }
-  button.ghost.danger { color: #a32d2d; border-color: #a32d2d; }
-  button:disabled { opacity: .5; cursor: default; }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .sess:hover { background: #ebe8e1; }
+  .sess.active { background: #fff; border-color: #d5d0c6; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  .sess .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess .del {
+    border: 0; background: transparent; color: #b3afa5; font-size: 14px;
+    line-height: 1; padding: 1px 4px; border-radius: 5px; opacity: 0;
+  }
+  .sess:hover .del { opacity: 1; }
+  .sess .del:hover { color: var(--guard); background: #f3e5e3; }
+  .sess .del.armed { opacity: 1; color: var(--guard); font-size: 11px; width: auto; }
+  .side-foot {
+    border-top: 1px solid var(--line); padding: 8px; display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .side-foot button {
+    flex: 1 1 auto; font-size: 12px; padding: 5px 8px; border-radius: 7px;
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+  }
+  .side-foot button:hover { background: #eae7e0; color: var(--text); }
+  .side-foot button.danger { color: var(--guard); border-color: var(--guard-line); background: #fff; }
+
+  /* ---------------- 主区 ---------------- */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar {
+    height: 54px; flex: 0 0 54px; display: flex; align-items: center; gap: 14px;
+    padding: 0 18px; border-bottom: 1px solid var(--line); background: #fff;
+  }
+  .topbar .title {
+    font-size: 14px; font-weight: 500; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;
+  }
+  .metrics { display: flex; gap: 14px; flex-wrap: nowrap; overflow: hidden; }
+  .metric { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .metric b { color: var(--text); font-weight: 600; margin-left: 3px; }
+  .metric.warn b { color: var(--guard); }
+  .menu-btn {
+    display: none; border: 1px solid var(--line); background: #fff;
+    border-radius: 8px; padding: 4px 9px; font-size: 15px; line-height: 1;
+  }
+
+  .chat { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
+  .stream {
+    max-width: 780px; width: 100%; margin: 0 auto; padding: 24px 24px 8px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  /* 空状态 */
+  .empty { max-width: 640px; width: 100%; margin: auto; padding: 0 24px 6vh; }
+  .empty h2 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  .empty p { color: var(--muted); font-size: 13.5px; margin: 0 0 20px; }
+  .demo-cards { display: grid; gap: 10px; }
+  .dcard {
+    text-align: left; padding: 12px 14px; border: 1px solid var(--line);
+    border-radius: 11px; background: #fff; transition: border-color .15s, transform .15s;
+  }
+  .dcard:hover { border-color: #c3bdd6; transform: translateY(-1px); }
+  .dcard .h { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; }
+  .dcard .d { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .dcard .q { font-size: 12.5px; color: var(--accent); margin-top: 6px; }
+
+  /* 消息 */
+  .msg { display: flex; flex-direction: column; }
+  .msg.user { align-items: flex-end; }
+  .msg.user .bubble {
+    background: #efedf9; color: #2b2740; border-radius: 14px 14px 4px 14px;
+    padding: 9px 14px; max-width: 78%; white-space: pre-wrap; word-break: break-word;
+    font-size: 14.5px; border: 1px solid #e2ddf4;
+  }
+  .msg.ai { align-items: stretch; }
+  .msg.ai .card {
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.02);
+  }
+  .ai-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
   .badge {
-    display: inline-block; font-size: 12px; padding: 2px 9px;
-    border-radius: 999px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px;
+    padding: 2px 9px; border-radius: 999px; font-weight: 600; white-space: nowrap;
   }
+  .badge.cache { background: var(--accent-bg); color: var(--accent); }
   .badge.easy { background: var(--easy-bg); color: var(--easy); }
   .badge.hard { background: var(--hard-bg); color: var(--hard); }
-  .badge.cache { background: #eeecfa; color: var(--accent); }
-  .notice {
-    background: var(--hard-bg); color: var(--hard); border: 1px solid #eddcc0;
-    border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: -8px 0 16px;
-  }
-  .meta { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 10px 0 14px; }
-  .meta b { color: var(--text); font-weight: 500; }
-  .answer { white-space: pre-wrap; font-size: 14px; }
-  .rag { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
-  .rag-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-  .rag-item { font-size: 12px; color: var(--muted); padding: 4px 0 4px 10px;
-    border-left: 2px solid var(--line); margin-bottom: 4px; }
-  .rag-item b { color: var(--text); font-weight: 500; }
-  .rag-item .src { color: var(--accent); }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px; }
-  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
-  .stat .k { font-size: 11px; color: var(--muted); }
-  .stat .v { font-size: 16px; font-weight: 600; margin-top: 2px; }
-  .hidden { display: none; }
-  .err { color: #a32d2d; font-size: 13px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-  th { color: var(--muted); font-weight: 500; }
+  .badge.guard { background: var(--guard-bg); color: var(--guard); border: 1px solid var(--guard-line); }
+  .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+  .meta b { color: #4a4842; font-weight: 600; }
+  .answer { white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+  .answer.pending { color: var(--muted); }
 
-  .sess-list { display: flex; flex-direction: column; gap: 6px; }
-  .sess {
-    display: flex; justify-content: space-between; align-items: center; gap: 10px;
-    padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
-    cursor: pointer; font-size: 12px; transition: border-color .15s, background .15s;
+  /* 门卫拦截：整个演示里最该被看见的一块 */
+  .guard-box {
+    margin: 10px 0 2px; padding: 10px 12px; border-radius: 10px;
+    background: var(--guard-bg); border: 1px solid var(--guard-line);
+    font-size: 12.5px; color: #7d2222; line-height: 1.6;
   }
-  .sess:hover { border-color: #9aa4b2; }
-  .sess.active { border-color: #2563eb; background: rgba(37, 99, 235, .07); }
-  .sess .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess .m { color: var(--muted); white-space: nowrap; font-size: 11px; }
-  .sess .del {
-    border: 1px solid transparent; background: transparent; color: var(--muted);
-    font-size: 13px; line-height: 1; padding: 2px 6px; border-radius: 6px; cursor: pointer;
+  .guard-box .gh {
+    font-weight: 700; display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
   }
-  .sess .del:hover { color: #a32d2d; border-color: #a32d2d; }
-  .sess .del.armed { color: #a32d2d; border-color: #a32d2d; font-size: 11px; }
-  .transcript { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
-  .msg { font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
-  .msg b { display: block; font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 2px; }
-  .msg.user b { color: #2563eb; }
+  .guard-box code {
+    background: #fff; border: 1px solid #f0d6d3; border-radius: 5px;
+    padding: 0 4px; font-size: 11.5px; color: #9b2c2c;
+  }
+  .guard-box .q { color: #9b5a5a; font-size: 11.5px; margin-top: 4px; }
+
+  .detail { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .detail summary {
+    cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; user-select: none;
+  }
+  .detail summary::-webkit-details-marker { display: none; }
+  .detail summary::before { content: "› "; }
+  .detail[open] summary::before { content: "⌄ "; }
+  .detail .body { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .rag-item { padding: 4px 0 4px 9px; border-left: 2px solid var(--line); margin-bottom: 4px; }
+  .rag-item .src { color: var(--accent); }
+  .rag-item b { color: var(--text); font-weight: 500; }
+
+  .typing { display: inline-flex; gap: 4px; align-items: center; }
+  .typing i {
+    width: 6px; height: 6px; border-radius: 50%; background: #bdb8ad;
+    animation: blink 1.2s infinite ease-in-out;
+  }
+  .typing i:nth-child(2) { animation-delay: .18s; }
+  .typing i:nth-child(3) { animation-delay: .36s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+
+  /* 输入区 */
+  .composer { border-top: 1px solid var(--line); background: #fff; padding: 10px 0 14px; }
+  .composer-inner { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: #fff; color: #5d5a52;
+  }
+  .chip:hover { border-color: #c3bdd6; color: var(--accent); }
+  .box {
+    display: flex; align-items: flex-end; gap: 8px; border: 1px solid #d8d4cb;
+    border-radius: 14px; padding: 8px 8px 8px 12px; background: #fff;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .box:focus-within { border-color: #b7aee8; box-shadow: 0 0 0 3px rgba(83,74,183,.08); }
+  textarea {
+    flex: 1; border: 0; outline: none; resize: none; font: inherit; font-size: 14.5px;
+    line-height: 1.6; max-height: 148px; min-height: 26px; padding: 4px 0;
+    background: transparent; color: var(--text);
+  }
+  .send {
+    border: 0; background: var(--accent); color: #fff; border-radius: 10px;
+    padding: 7px 16px; font-size: 13.5px; font-weight: 500; flex: 0 0 auto;
+  }
+  .send:disabled { opacity: .45; }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 16px; }
+  .hint .err { color: var(--guard); }
+
+  /* 统计抽屉 */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(30,28,24,.28); opacity: 0;
+    pointer-events: none; transition: opacity .18s; z-index: 20;
+  }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; height: 100%; width: 400px; max-width: 92vw;
+    background: #fff; border-left: 1px solid var(--line); z-index: 21;
+    transform: translateX(100%); transition: transform .22s ease;
+    display: flex; flex-direction: column;
+  }
+  .drawer.on { transform: none; }
+  .drawer-head {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .drawer-head b { font-size: 14px; font-weight: 600; }
+  .drawer-body { padding: 16px 18px 40px; overflow-y: auto; }
+  .sec-t { font-size: 11px; color: var(--muted); letter-spacing: .4px; margin: 18px 0 8px; }
+  .sec-t:first-child { margin-top: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kv { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; }
+  .kv .k { font-size: 11px; color: var(--muted); }
+  .kv .v { font-size: 15px; font-weight: 600; margin-top: 1px; }
+  .kv .v small { font-size: 11px; font-weight: 400; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line-soft); }
+  th { color: var(--muted); font-weight: 500; }
+  td .gd { color: var(--guard); }
+  .note {
+    font-size: 11.5px; color: var(--hard); background: var(--hard-bg);
+    border: 1px solid #eddcc0; border-radius: 8px; padding: 8px 10px; margin-bottom: 12px;
+  }
+  .hidden { display: none !important; }
+
+  @media (max-width: 860px) {
+    .side {
+      position: fixed; left: 0; top: 0; bottom: 0; z-index: 30;
+      transform: translateX(-100%); transition: transform .22s;
+    }
+    .side.on { transform: none; }
+    .menu-btn { display: block; }
+    .metrics { display: none; }
+    .stream, .composer-inner { padding-left: 14px; padding-right: 14px; }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>混合推理 Agent · 路由演示</h1>
-  <div class="sub">简单请求走本地小模型，复杂请求升级到云端大模型。每一笔 Token 与成本都会被记录。</div>
-  <div id="mode-note" class="notice hidden"></div>
 
-  <div class="card">
-    <textarea id="q" placeholder="输入一个问题，例如：把「今天天气不错」翻译成英文"></textarea>
-    <div class="chips">
-      <button class="ghost" data-q="你好，你是谁？">闲聊</button>
-      <button class="ghost" data-q="把「会议推迟到周四下午三点」翻译成英文">翻译</button>
-      <button class="ghost" data-q="用 Python 写一个带超时控制的进程池，并解释为什么用 deque 而不是 list 做任务队列">写代码</button>
-      <button class="ghost" data-q="分析一下 8GB 显存跑 14B 模型 4bit 量化时的显存占用，并给出优化方案">长推理</button>
-    </div>
-    <div class="row">
-      <button class="primary" id="send">发送</button>
-      <button id="new-session" class="ghost">新会话</button>
-      <button id="clear" class="ghost">清空统计</button>
-      <span id="hint" class="sub" style="margin:0"></span>
-    </div>
-    <div class="sub" style="margin:8px 0 0">当前会话 <b id="sid"></b> · 同一会话内的多轮请求共享上下文</div>
-    <div class="sub" style="margin:4px 0 0">长期记忆身份 <b id="uid"></b> · 跨会话记住你的关键事实
-      <button id="forget" class="ghost">忘掉我</button></div>
+<aside class="side" id="side">
+  <div class="brand">
+    <h1>混合推理 Agent</h1>
+    <div class="tag">路由 · 语义缓存 · 检索</div>
   </div>
-
-  <div class="card" id="sessions-card" style="margin-top:14px">
-    <div class="row" style="margin:0 0 8px">
-      <div class="sub" style="margin:0; flex:1">历史会话 <span id="sess-count"></span> · 点一条可以切回去接着聊</div>
-      <button id="clear-sessions" class="ghost">清空全部会话</button>
-    </div>
-    <div id="sessions" class="sess-list"><div class="sub" style="margin:0">加载中…</div></div>
+  <button class="newchat" id="new-chat"><span class="plus">＋</span> 新对话</button>
+  <div class="side-label"><span>我的对话</span><span id="sess-count"></span></div>
+  <div class="sess-list" id="sessions"></div>
+  <div class="side-foot">
+    <button id="open-stats">统计</button>
+    <button id="forget">忘掉我</button>
+    <button id="clear-sessions">清空对话</button>
+    <button id="clear-stats">清空统计</button>
   </div>
+</aside>
 
-  <div class="card hidden" id="transcript-card" style="margin-top:14px">
-    <div class="sub" style="margin:0 0 8px">会话记录</div>
-    <div id="transcript" class="transcript"></div>
-  </div>
-
-  <div class="card hidden" id="result" style="margin-top:14px">
-    <div><span id="badge" class="badge"></span> <span id="reason" class="sub" style="margin:0"></span></div>
-    <div class="meta">
-      <span>决策依据 <b id="by"></b></span>
-      <span>耗时 <b id="lat"></b></span>
-      <span>成本 <b id="cost"></b></span>
-      <span>全云端 <b id="base"></b></span>
-      <span>节省 <b id="saved"></b></span>
-      <span>引擎 <b id="engine"></b></span>
-    </div>
-    <div class="answer" id="answer"></div>
-    <div class="rag hidden" id="rag">
-      <div class="rag-title">参考资料 <span id="rag-count" class="sub" style="margin:0"></span></div>
-      <div id="rag-list"></div>
+<main class="main">
+  <div class="topbar">
+    <button class="menu-btn" id="menu">≡</button>
+    <div class="title" id="sess-title">新对话</div>
+    <div class="metrics" id="metrics">
+      <span class="metric">轮次<b id="m-turns">0</b></span>
+      <span class="metric">成本<b id="m-cost">¥0</b></span>
+      <span class="metric">节省<b id="m-saved">—</b></span>
+      <span class="metric">命中<b id="m-hit">0</b></span>
+      <span class="metric warn">门卫拦截<b id="m-guard">0</b></span>
     </div>
   </div>
 
-  <div class="stats">
-    <div class="stat"><div class="k">请求数</div><div class="v" id="s-runs">0</div></div>
-    <div class="stat"><div class="k">累计成本</div><div class="v" id="s-cost">¥0</div></div>
-    <div class="stat"><div class="k">较全云端节省</div><div class="v" id="s-save">0%</div></div>
-    <div class="stat"><div class="k">平均延迟</div><div class="v" id="s-lat">0ms</div></div>
-    <div class="stat"><div class="k">缓存命中</div><div class="v" id="s-cache">0</div></div>
-    <div class="stat"><div class="k">缓存命中率</div><div class="v" id="s-cache-ratio">0%</div></div>
-    <div class="stat"><div class="k">缓存省下</div><div class="v" id="s-cache-cost">¥0</div></div>
-    <div class="stat"><div class="k">缓存条目</div><div class="v" id="s-cache-entries">0</div></div>
+  <div class="chat" id="chat">
+    <div class="stream" id="stream"></div>
+    <div class="empty" id="empty">
+      <h2>问点什么，看它怎么省钱</h2>
+      <p>同一个问题问两遍会走缓存（¥0）；差一个字的另一个问题会被"门卫"拦下，不敢复用。</p>
+      <div class="demo-cards">
+        <button class="dcard" data-demo="cache">
+          <div class="h">① 缓存命中演示</div>
+          <div class="d">连续问两次同一个问题，第二次走缓存，成本归零。</div>
+          <div class="q">把 3 点 15 分转换成 24 小时制的数字写法</div>
+        </button>
+        <button class="dcard" data-demo="guard">
+          <div class="h">② 门卫拦截演示</div>
+          <div class="d">和第 ① 步只差一个数字。相似度 0.9+，但答案完全不同，必须拒绝复用。</div>
+          <div class="q">把 3 点 45 分转换成 24 小时制的数字写法</div>
+        </button>
+        <button class="dcard" data-demo="ask">
+          <div class="h">③ 随便问个复杂的</div>
+          <div class="d">看它判定难度、决定走本地还是云端，并把每一笔花销记下来。</div>
+          <div class="q">用 Python 写一个带超时控制的进程池，并解释为什么用 deque 而不是 list 做任务队列</div>
+        </button>
+      </div>
+    </div>
   </div>
 
-  <div class="card" style="margin-top:14px">
-    <div class="sub" style="margin:0 0 4px">最近请求</div>
-    <table>
-      <thead><tr><th>时间</th><th>问题</th><th>路由</th><th>耗时</th><th>成本</th></tr></thead>
-      <tbody id="recent"></tbody>
-    </table>
+  <div class="composer">
+    <div class="composer-inner">
+      <div class="chips">
+        <button class="chip" data-q="你好，你是谁？">闲聊</button>
+        <button class="chip" data-q="把「会议推迟到周四下午三点」翻译成英文">翻译</button>
+        <button class="chip" data-q="熔断器的三个状态是什么？">查资料</button>
+        <button class="chip" data-q="什么是语义缓存？">概念</button>
+      </div>
+      <div class="box">
+        <textarea id="q" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button class="send" id="send">发送</button>
+      </div>
+      <div class="hint" id="hint"></div>
+    </div>
   </div>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <b>运行数据</b>
+    <button class="chip" id="close-drawer">关闭</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const fmt = (n, d = 4) => Number(n).toFixed(d);
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const money = (n, d = 6) => {
+  const v = Number(n || 0);
+  if (!v) return '¥0';
+  if (v >= 0.01) return '¥' + v.toFixed(4);
+  return '¥' + v.toFixed(d);
+};
+
 
 // 预览面板里看不到控制台，脚本一报错就"点了没反应"。把错误显示在页面上。
 window.addEventListener('error', (e) => {
-  const h = document.getElementById('hint');
-  if (h) h.textContent = '页面脚本错误：' + (e.message || e.error);
+  const h = $('hint');
+  if (h) h.innerHTML = '<span class="err">页面脚本错误：' + esc(e.message || e.error) + '</span>';
 });
 
-// 会话 id：同一浏览器复用同一个 id（刷新后还能接着聊），点"新会话"才换。
-// 后端用它当 checkpointer 的 thread_id，同 id 的请求共享多轮上下文。
-const SID_KEY = 'hybrid_agent_sid';
+// ---------------- 本地状态 ----------------
+const SID_KEY = 'hybrid_agent_sid';     // 当前会话
+const SIDS_KEY = 'hybrid_agent_sids';   // 这台浏览器创建过的会话（只显示自己的）
+const UID_KEY = 'hybrid_agent_uid';     // 长期记忆身份，跨会话不变
+
 function newSid() {
   const raw = (window.crypto && crypto.randomUUID)
     ? crypto.randomUUID()
     : String(Date.now()) + Math.random().toString(16).slice(2);
   return raw.replace(/-/g, '').slice(0, 12);
 }
-let sessionId = localStorage.getItem(SID_KEY) || newSid();
-localStorage.setItem(SID_KEY, sessionId);
-function renderSid() { $('sid').textContent = sessionId; }
 
-// 长期记忆身份：与 session_id 独立——"新会话"只是换对话，不会忘掉你是谁。
-const UID_KEY = 'hybrid_agent_uid';
+let mySids = [];
+try { mySids = JSON.parse(localStorage.getItem(SIDS_KEY) || '[]'); } catch (e) { mySids = []; }
+if (!Array.isArray(mySids)) mySids = [];
+
+let sessionId = localStorage.getItem(SID_KEY) || newSid();
+// ?s=<会话id> 直接打开某个对话：方便把"我在哪个对话里演示的"整段链接发出去，
+// 也方便面试时提前把两条对照问题摆好，点开就是现场。
+const urlSid = new URLSearchParams(location.search).get('s');
+if (urlSid) sessionId = urlSid.slice(0, 64);
+if (!mySids.includes(sessionId)) mySids.unshift(sessionId);
+localStorage.setItem(SID_KEY, sessionId);
+localStorage.setItem(SIDS_KEY, JSON.stringify(mySids));
+
 let userId = localStorage.getItem(UID_KEY) || ('user-' + newSid());
 localStorage.setItem(UID_KEY, userId);
-function renderUid() { $('uid').textContent = userId; }
 
-// ---------------- 会话列表 / 历史回显 ----------------
-const esc = (s) => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;');
+// 后端 /api/sessions 是全站会话（含别人的）。本地只认自己创建过的那些 id，
+// 这样左侧列表就只有"我的对话"——既不会串台，也不会看到陌生人的提问。
+let serverSessions = new Map();   // sid -> {title, turns, updated_at, updated_ts}
+let busy = false;
+
+// ---------------- 渲染：会话列表 ----------------
+function sessionTitle(sid) {
+  const s = serverSessions.get(sid);
+  return s && s.title ? s.title : '新对话';
+}
+
+function renderSidebar() {
+  const items = mySids.map((sid) => ({ sid, ...(serverSessions.get(sid) || {}) }));
+  items.sort((a, b) => (b.updated_ts || 0) - (a.updated_ts || 0));
+  $('sess-count').textContent = items.length ? items.length + ' 个' : '';
+  if (!items.length) {
+    $('sessions').innerHTML = '<div style="padding:10px 10px;font-size:12px;color:#9b978d">还没有对话</div>';
+    return;
+  }
+  $('sessions').innerHTML = items.map((it) => `
+    <div class="sess ${it.sid === sessionId ? 'active' : ''}" data-sid="${esc(it.sid)}">
+      <span class="t">${esc(sessionTitle(it.sid))}</span>
+      <button class="del" data-del="${esc(it.sid)}" title="删除这个对话">×</button>
+    </div>`).join('');
+  $('sessions').querySelectorAll('.sess').forEach((el) => {
+    el.onclick = () => switchSession(el.dataset.sid);
+  });
+  $('sessions').querySelectorAll('.del').forEach((btn) => {
+    btn.onclick = (e) => { e.stopPropagation(); armDelete(btn.dataset.del, btn); };
+  });
+}
 
 async function loadSessions() {
   try {
-    const r = await fetch('/api/sessions');
+    const r = await fetch('/api/sessions?limit=50');
     const d = await r.json();
-    const list = d.sessions || [];
-    $('sess-count').textContent = list.length ? `(${list.length})` : '';
-    if (!list.length) {
-      $('sessions').innerHTML = '<div class="sub" style="margin:0">' +
-        (d.note || '还没有历史会话，先聊几句吧') + '</div>';
-      return;
-    }
-    $('sessions').innerHTML = list.map((s) => `
-      <div class="sess ${s.session_id === sessionId ? 'active' : ''}" data-sid="${esc(s.session_id)}">
-        <span class="t">${esc(s.title)}</span>
-        <span class="m">${s.turns} 轮 · ${esc(s.updated_at)}</span>
-        <button class="del" data-del="${esc(s.session_id)}" title="删除这个会话">×</button>
-      </div>`).join('');
-    $('sessions').querySelectorAll('.sess').forEach((el) => {
-      el.onclick = () => switchSession(el.dataset.sid);
-    });
-    $('sessions').querySelectorAll('.del').forEach((btn) => {
-      btn.onclick = (e) => { e.stopPropagation(); armDelete(btn.dataset.del, btn); };
-    });
-  } catch (e) {
-    $('sessions').innerHTML = '<div class="sub" style="margin:0">会话列表加载失败：' + esc(e) + '</div>';
+    const m = new Map();
+    (d.sessions || []).forEach((s) => m.set(s.session_id, s));
+    serverSessions = m;
+  } catch (e) { /* 列表拉不到不影响聊天 */ }
+  renderSidebar();
+}
+
+// ---------------- 渲染：对话流 ----------------
+const LAYER_LABEL = {
+  cache: ['语义缓存命中', 'cache'],
+  local: ['本地小模型', 'easy'],
+  cloud: ['云端大模型', 'hard'],
+};
+
+function layerOf(meta) {
+  // 历史记录只有 decided_by / model，没有现成的 layer：按同样口径反推。
+  // 和 server._layer_of 保持一致，否则历史消息和实时消息的徽章会不一样。
+  if (!meta) return 'cloud';
+  if (meta.decided_by === 'cache') return 'cache';
+  const model = String(meta.model || '');
+  if (meta.layer) return meta.layer;
+  if (window.__localModel && model.startsWith(window.__localModel)) return 'local';
+  return 'cloud';
+}
+
+function badgeHtml(meta) {
+  if (!meta) return '';
+  const [label, cls] = LAYER_LABEL[layerOf(meta)] || LAYER_LABEL.cloud;
+  let html = `<span class="badge ${cls}">${label}</span>`;
+  if (meta.guard_blocked) {
+    html += `<span class="badge guard">门卫拦截</span>`;
   }
+  return html;
 }
 
-async function switchSession(sid) {
-  if (!sid) return;
-  sessionId = sid;
-  localStorage.setItem(SID_KEY, sid);
-  renderSid();
-  await loadTranscript();
-  loadSessions();
-  $('hint').textContent = '已切换到这个会话，可以接着聊';
-  setTimeout(() => { if ($('hint').textContent.startsWith('已切换到')) $('hint').textContent = ''; }, 2500);
+function metaLine(meta) {
+  if (!meta) return '';
+  const parts = [];
+  parts.push(`耗时 <b>${meta.latency_ms || 0}ms</b>`);
+  parts.push(`成本 <b>${money(meta.cost_cny)}</b>`);
+  const base = Number(meta.baseline_cost_cny || 0);
+  const cost = Number(meta.cost_cny || 0);
+  if (base > 0) parts.push(`全云端 <b>${money(base)}</b>`);
+  if (base > 0) {
+    const saved = Math.max(0, Math.round((1 - cost / base) * 100));
+    parts.push(`省 <b>${saved}%</b>`);
+  }
+  // 相似度：命中时说明"凭什么复用"，被拦时说明"凭什么不敢复用"
+  const sc = Number(meta.hit_score || 0);
+  if (sc > 0) parts.push(`相似度 <b>${sc.toFixed(3)}</b>`);
+  return `<div class="meta">${parts.join('<span style="color:#ddd9d0">·</span>')}</div>`;
 }
 
-async function loadTranscript() {
+function guardBox(meta) {
+  if (!meta || !meta.guard_blocked) return '';
+  const sc = Number(meta.hit_score || 0);
+  const score = sc > 0 ? sc.toFixed(3) : '未知';
+  const thr = (window.__cacheCfg && window.__cacheCfg.threshold) || null;
+  const thrText = thr ? `比 <code>${Number(thr).toFixed(2)}</code> 的复用线还高` : '已超过复用线';
+  return `
+    <div class="guard-box">
+      <div class="gh">门卫拦截 · 这一轮拒绝复用缓存</div>
+      有一条缓存候选，相似度 <code>${score}</code> ${thrText}，
+      但守卫发现 <code>${esc(meta.guard_blocked)}</code>——
+      这一问的答案会不一样，复用就是给你别人的答案。已改走模型重新作答。
+      ${meta.guard_matched ? `<div class="q">差点被复用的原问题：${esc(meta.guard_matched)}</div>` : ''}
+    </div>`;
+}
+
+// 后端历史消息只有 role/content，元信息在记账表里按顺序对。用 query 文本核对，
+// 对不上就不挂元信息 —— 宁可少显示，也不要把 A 轮的耗时贴到 B 轮上。
+function buildStream(messages, turns) {
+  const out = [];
+  let ti = 0;
+  for (const m of messages) {
+    const role = m.role === 'user' ? 'user' : 'ai';
+    if (role === 'user') {
+      out.push({ role, content: m.content, meta: null });
+      continue;
+    }
+    let meta = null;
+    const t = turns[ti];
+    if (t) {
+      const prevUser = [...out].reverse().find((x) => x.role === 'user');
+      const same = prevUser && (t.query || '').slice(0, 24) === (prevUser.content || '').slice(0, 24);
+      if (!prevUser || same) meta = { ...t, hit_score: t.cache_score };
+    }
+    out.push({ role, content: m.content, meta });
+    if (t) ti++;
+  }
+  return out;
+}
+
+function nodeHtml(item) {
+  if (item.role === 'user') {
+    return `<div class="msg user"><div class="bubble">${esc(item.content)}</div></div>`;
+  }
+  const m = item.meta;
+  return `
+    <div class="msg ai"><div class="card">
+      <div class="ai-head">${badgeHtml(m)}</div>
+      <div class="answer">${esc(item.content)}</div>
+      ${guardBox(m)}
+      ${metaLine(m)}
+      ${item.extra || ''}
+    </div></div>`;
+}
+
+function paint(items) {
+  $('empty').classList.toggle('hidden', items.length > 0);
+  $('stream').innerHTML = items.map(nodeHtml).join('');
+  scrollBottom();
+}
+
+function scrollBottom() {
+  const c = $('chat');
+  c.scrollTop = c.scrollHeight;
+}
+
+let currentItems = [];
+let currentTurns = [];
+
+async function loadCurrent() {
   try {
     const r = await fetch('/api/sessions/' + encodeURIComponent(sessionId));
     const d = await r.json();
-    renderTranscript(d.messages || []);
+    currentTurns = d.turns || [];
+    currentItems = buildStream(d.messages || [], currentTurns);
+    paint(currentItems);
+    updateMetrics(currentTurns);
+    const first = (d.messages || []).find((m) => m.role === 'user');
+    $('sess-title').textContent = first ? first.content.slice(0, 40) : '新对话';
   } catch (e) {
-    renderTranscript([]);
+    currentItems = [];
+    currentTurns = [];
+    paint([]);
+    updateMetrics([]);
+    $('sess-title').textContent = '新对话';
   }
 }
 
-function renderTranscript(messages) {
-  const card = $('transcript-card');
-  if (!messages.length) { card.classList.add('hidden'); $('transcript').innerHTML = ''; return; }
-  card.classList.remove('hidden');
-  $('transcript').innerHTML = messages.map((m) => `
-    <div class="msg ${m.role === 'user' ? 'user' : 'ai'}">
-      <b>${m.role === 'user' ? '我' : 'AI'}</b>${esc(m.content)}
-    </div>`).join('');
-  $('transcript').scrollTop = $('transcript').scrollHeight;
+// 顶部这套数字只算「当前这个对话」，全站累计放在统计抽屉里。
+// 混在一起会出现"我就问了 2 句，怎么显示 80 次请求"的困惑。
+function updateMetrics(turns) {
+  const n = turns.length;
+  let cost = 0, base = 0, hits = 0, guards = 0;
+  for (const t of turns) {
+    cost += Number(t.cost_cny || 0);
+    base += Number(t.baseline_cost_cny || 0);
+    if (t.decided_by === 'cache') hits++;
+    if (t.guard_blocked) guards++;
+  }
+  $('m-turns').textContent = n;
+  $('m-cost').textContent = money(cost, 4);
+  $('m-saved').textContent = base > 0 ? Math.max(0, Math.round((1 - cost / base) * 100)) + '%' : '—';
+  $('m-hit').textContent = hits;
+  $('m-guard').textContent = guards;
 }
 
-// ---------------- 删除会话 ----------------
-// 同样是页面内二次确认（嵌入式预览里 confirm 弹窗会被拦掉）
-let armedDelete = null;
-let armedTimer = null;
+// ---------------- 发消息 ----------------
+function autoGrow() {
+  const t = $('q');
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 148) + 'px';
+}
+$('q').addEventListener('input', autoGrow);
 
-function disarmDelete(btn) {
-  armedDelete = null;
-  if (btn) { btn.textContent = '×'; btn.classList.remove('armed'); }
+function setHint(text, isErr) {
+  $('hint').innerHTML = text ? (isErr ? `<span class="err">${esc(text)}</span>` : esc(text)) : '';
 }
 
-async function armDelete(sid, btn) {
-  if (armedDelete !== sid) {
-    armedDelete = sid;
-    btn.textContent = '确认删除';
-    btn.classList.add('armed');
-    clearTimeout(armedTimer);
-    armedTimer = setTimeout(() => disarmDelete(btn), 3000);
-    return;
-  }
-  clearTimeout(armedTimer);
-  disarmDelete(btn);
-  await removeSession(sid);
-}
-
-async function removeSession(sid) {
-  try {
-    const r = await fetch('/api/sessions/' + encodeURIComponent(sid), { method: 'DELETE' });
-    const d = await r.json();
-    if (sid === sessionId) {          // 删的是当前会话：立刻开一个新的，避免停在空壳上
-      sessionId = newSid();
-      localStorage.setItem(SID_KEY, sessionId);
-      renderSid();
-      renderTranscript([]);
-      $('result').classList.add('hidden');
-    }
-    $('hint').textContent = `已删除会话（${d.deleted} 个快照）`;
-    setTimeout(() => { $('hint').textContent = ''; }, 2500);
-    loadSessions();
-  } catch (e) {
-    $('hint').textContent = '删除失败：' + e;
-  }
-}
-
-document.querySelectorAll('[data-q]').forEach((b) => {
-  b.onclick = () => { $('q').value = b.dataset.q; };
-});
-
-async function refresh() {
-  const r = await fetch('/api/stats');
-  const { summary: s, recent, cache, local_enabled, quota } = await r.json();
-  $('s-runs').textContent = s.runs;
-  $('s-cost').textContent = '¥' + fmt(s.cost_cny, 4);
-  $('s-save').textContent = (s.saved_ratio * 100).toFixed(1) + '%';
-  $('s-lat').textContent = s.avg_latency_ms + 'ms';
-
-  // 如实标注当前运行形态：云端容器里没有 GPU，本地小模型这一层是缺席的。
-  // 不说清楚的话，访客会以为看到的数字来自混合路由。
-  const notes = [];
-  if (local_enabled === false) {
-    notes.push('线上版为纯云端模式：本地小模型跑在我自己的机器上，云端容器没有 GPU。'
-             + '路由、缓存、记忆、记账逻辑与本地版一致，只是"简单请求"由云端代答。');
-  }
-  if (quota) notes.push(`今日演示额度 ${quota.used}/${quota.limit} 次`);
-  $('mode-note').className = notes.length ? 'notice' : 'notice hidden';
-  $('mode-note').textContent = notes.join(' · ');
-
-  if (cache) {
-    $('s-cache').textContent = s.cache_hits ?? 0;
-    $('s-cache-ratio').textContent = ((s.cache_hit_ratio || 0) * 100).toFixed(1) + '%';
-    $('s-cache-cost').textContent = '¥' + fmt(cache.cost_saved_cny, 6);
-    $('s-cache-entries').textContent = cache.entries;
-  }
-  $('recent').innerHTML = recent.map((x) => `
-    <tr>
-      <td>${x.ts.slice(11)}</td>
-      <td>${x.query.slice(0, 26)}</td>
-      <td>${x.decided_by === 'cache' ? '⚡缓存' : x.route}</td>
-      <td>${x.latency_ms}ms</td>
-      <td>${x.decided_by === 'cache' ? '0（命中）' : '¥' + fmt(x.cost_cny, 6)}</td>
-    </tr>`).join('');
+// 把这一轮的元信息换成和记账表同样的字段形状，好让顶栏指标能直接用同一套算法累加。
+// 不重新拉接口是为了不打断正在滚动的对话。
+function turnsRowOf(meta, query) {
+  return {
+    query,
+    decided_by: meta.decided_by,
+    route: meta.layer === 'local' ? 'easy' : 'hard',
+    latency_ms: meta.latency_ms,
+    cost_cny: meta.cost_cny,
+    baseline_cost_cny: meta.baseline_cost_cny,
+    guard_blocked: meta.guard_blocked,
+  };
 }
 
 async function send() {
   const query = $('q').value.trim();
-  if (!query) return;
-  const btn = $('send');
-  btn.disabled = true;
-  $('hint').textContent = '推理中…';
+  if (!query || busy) return;
+  busy = true;
+  $('send').disabled = true;
+  $('q').value = '';
+  autoGrow();
+  setHint('推理中…');
+
+  // 先把用户这句和"正在思考"占位画上去：答案就出现在提问的正下方，
+  // 不用等整页刷新、也不会掉到页面最底部去。
+  const items = currentItems.slice();
+  items.push({ role: 'user', content: query, meta: null });
+  items.push({ role: 'ai', content: '', meta: null, extra: '', pending: true });
+  paintPending(items);
+
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, session_id: sessionId, user_id: userId })
+      body: JSON.stringify({ query, session_id: sessionId, user_id: userId }),
     });
     const d = await r.json();
-    if (d.error) { $('hint').textContent = d.error; return; }
-
-    $('result').classList.remove('hidden');
-    // 显示"实际产出这一轮答案的层"，而不是"打算走哪一层"。
-    // 本地模型挂掉降级到云端时 route 仍是 easy，照 route 显示就等于撒谎。
-    const LAYER = { cache: ['语义缓存命中', 'cache'], local: ['本地小模型', 'easy'], cloud: ['云端大模型', 'hard'] };
-    const [label, cls] = LAYER[d.layer] || LAYER.cloud;
-    $('badge').textContent = label;
-    $('badge').className = 'badge ' + cls;
-    $('reason').textContent = d.reason + (d.escalated ? ' · 已升级' : '');
-    $('by').textContent = d.decided_by;
-    $('lat').textContent = d.latency_ms + 'ms';
-    $('cost').textContent = '¥' + fmt(d.cost_cny, 6);
-    $('base').textContent = '¥' + fmt(d.baseline_cost_cny, 6);
-    const saved = d.baseline_cost_cny > 0 ? (1 - d.cost_cny / d.baseline_cost_cny) : 0;
-    $('saved').textContent = (saved * 100).toFixed(0) + '%';
-    $('answer').textContent = d.answer || '(空回答)';
-    $('engine').textContent = d.engine || '-';
-
-    // 检索来源：命中时列出实际参考了哪几段。这是"答案不是编的"的唯一证据，
-    // 所以要把出处和分数一起亮出来，而不是只说"用了 RAG"。
-    const rg = d.rag || {};
-    if (rg.hit && rg.chunks && rg.chunks.length) {
-      $('rag').classList.remove('hidden');
-      $('rag-count').textContent =
-        `${rg.chunks.length} 段 · 检索 ${rg.latency_ms || 0}ms · 注入 ${(d.memory?.ctx_tokens?.rag) || 0} token`;
-      $('rag-list').innerHTML = rg.chunks.map((c) => `
-        <div class="rag-item">
-          <span class="src">${c.doc}${c.heading ? ' § ' + c.heading : ''}</span>
-          <b> 相关度 ${c.score}</b> <span class="sub" style="margin:0">BM25 ${c.bm25}</span>
-        </div>`).join('');
-    } else {
-      $('rag').classList.add('hidden');
+    if (d.error) {
+      items.pop();
+      items.push({ role: 'ai', content: '（这一轮没拿到答案）' + d.error, meta: null });
+      paint(items);
+      currentItems = items;
+      setHint(d.error, true);
+      return;
     }
 
-    // 上下文工程可观测：本轮注入/记住了什么
+    const meta = {
+      decided_by: d.decided_by,
+      model: d.model,
+      layer: d.layer,
+      latency_ms: d.latency_ms,
+      cost_cny: d.cost_cny,
+      baseline_cost_cny: d.baseline_cost_cny,
+      guard_blocked: (d.cache_guard && d.cache_guard.blocked) ? d.cache_guard.reason : '',
+      guard_matched: d.cache_guard ? d.cache_guard.matched : '',
+      hit_score: (d.cache_hit ? d.cache_score : (d.cache_guard ? d.cache_guard.score : null)),
+    };
+
+    // 检索来源：答案不是编的唯一证据，所以要让出处可见
+    let extra = '';
+    const rg = d.rag || {};
+    if (rg.hit && rg.chunks && rg.chunks.length) {
+      extra = `<details class="detail"><summary>参考了 ${rg.chunks.length} 段资料（检索 ${rg.latency_ms || 0}ms）</summary>
+        <div class="body">${rg.chunks.map((c) => `
+          <div class="rag-item"><span class="src">${esc(c.doc)}${c.heading ? ' § ' + esc(c.heading) : ''}</span>
+          <b> 相关度 ${esc(c.score)}</b></div>`).join('')}</div></details>`;
+    }
     const mem = d.memory || {};
-    let memNote = [];
-    if (mem.facts_injected && mem.facts_injected.length)
-      memNote.push('注入记忆: ' + mem.facts_injected.join(', '));
-    if (mem.facts_saved && mem.facts_saved.length)
-      memNote.push('新记住: ' + mem.facts_saved.join(', '));
-    if (mem.summary_used) memNote.push('使用摘要');
-    $('hint').textContent = memNote.join(' · ');
-    setTimeout(() => { if ($('hint').textContent.startsWith('注入记忆') ||
-        $('hint').textContent.startsWith('新记住')) $('hint').textContent = ''; }, 4000);
-    $('hint').textContent = '';
-    refresh();
-    loadTranscript();
+    const memBits = [];
+    if (mem.facts_injected && mem.facts_injected.length) memBits.push('注入记忆：' + mem.facts_injected.join('、'));
+    if (mem.facts_saved && mem.facts_saved.length) memBits.push('新记住：' + mem.facts_saved.join('、'));
+    if (mem.summary_used) memBits.push('使用了早前对话的摘要');
+    if (memBits.length) {
+      extra += `<details class="detail"><summary>上下文做了什么</summary>
+        <div class="body">${esc(memBits.join('；'))}</div></details>`;
+    }
+
+    items.pop();
+    items.push({ role: 'ai', content: d.answer || '（空回答）', meta, extra });
+    currentItems = items;
+    currentTurns = currentTurns.concat([turnsRowOf(meta, query)]);
+    paint(items);
+    updateMetrics(currentTurns);
+    $('sess-title').textContent = (currentItems.find((x) => x.role === 'user') || {}).content.slice(0, 40) || '新对话';
+
+    if (meta.guard_blocked) {
+      setHint('这一轮被门卫拦下了：差点复用一条别的答案，已重新作答');
+    } else if (d.cache_hit) {
+      setHint('命中语义缓存：没有调用模型，这一轮成本为 0');
+    } else {
+      setHint('');
+    }
+    setTimeout(() => { if (!$('hint').textContent.startsWith('请求失败')) setHint(''); }, 4200);
+
     loadSessions();
+    refreshGlobal();
   } catch (e) {
-    $('hint').textContent = '请求失败：' + e;
+    items.pop();
+    items.push({ role: 'ai', content: '（请求失败）' + e, meta: null });
+    currentItems = items;
+    paint(items);
+    setHint('请求失败：' + e, true);
   } finally {
-    btn.disabled = false;
+    busy = false;
+    $('send').disabled = false;
+    $('q').focus();
   }
 }
 
-$('send').onclick = send;
-$('q').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-});
-$('new-session').onclick = () => {
+function paintPending(items) {
+  $('empty').classList.add('hidden');
+  $('stream').innerHTML = items.map((it) => {
+    if (it.pending) {
+      return `<div class="msg ai"><div class="card">
+        <div class="ai-head"><span class="badge hard">思考中</span></div>
+        <div class="typing"><i></i><i></i><i></i></div>
+      </div></div>`;
+    }
+    return nodeHtml(it);
+  }).join('');
+  scrollBottom();
+}
+
+// ---------------- 会话切换 / 新建 / 删除 ----------------
+async function switchSession(sid) {
+  if (!sid || sid === sessionId) { closeSide(); return; }
+  sessionId = sid;
+  localStorage.setItem(SID_KEY, sid);
+  renderSidebar();
+  await loadCurrent();
+  closeSide();
+}
+
+function startNewSession() {
   sessionId = newSid();
   localStorage.setItem(SID_KEY, sessionId);
-  renderSid();
-  $('result').classList.add('hidden');
-  renderTranscript([]);          // 新会话还没有记录
-  loadSessions();                // 让列表里的高亮跟着变
-  $('hint').textContent = '已开启新会话，旧的会话在下面列表里可以随时切回';
-  setTimeout(() => { $('hint').textContent = ''; }, 3000);
-};
-// 清空全部会话：二次确认，同样不用 confirm
-let armedClearAll = false;
-let clearAllTimer = null;
-$('clear-sessions').onclick = async () => {
-  const btn = $('clear-sessions');
-  if (!armedClearAll) {
-    armedClearAll = true;
-    btn.textContent = '再点一次确认';
-    btn.classList.add('danger');
-    $('hint').textContent = '将删除全部会话记忆（含历史对话），不可恢复';
-    clearAllTimer = setTimeout(() => {
-      armedClearAll = false;
-      btn.textContent = '清空全部会话';
-      btn.classList.remove('danger');
-      $('hint').textContent = '';
+  if (!mySids.includes(sessionId)) mySids.unshift(sessionId);
+  localStorage.setItem(SIDS_KEY, JSON.stringify(mySids));
+  currentItems = [];
+  paint([]);
+  updateMetrics([]);
+  $('sess-title').textContent = '新对话';
+  renderSidebar();
+  $('q').focus();
+  closeSide();
+}
+
+$('new-chat').onclick = startNewSession;
+
+let armedDel = null, armedDelTimer = null;
+function armDelete(sid, btn) {
+  if (armedDel !== sid) {
+    armedDel = sid;
+    btn.textContent = '确认删除';
+    btn.classList.add('armed');
+    clearTimeout(armedDelTimer);
+    armedDelTimer = setTimeout(() => {
+      armedDel = null; btn.textContent = '×'; btn.classList.remove('armed');
     }, 3000);
     return;
   }
-  clearTimeout(clearAllTimer);
-  armedClearAll = false;
-  btn.textContent = '清空全部会话';
+  clearTimeout(armedDelTimer);
+  armedDel = null;
+  removeSession(sid);
+}
+
+async function removeSession(sid) {
+  try { await fetch('/api/sessions/' + encodeURIComponent(sid), { method: 'DELETE' }); } catch (e) {}
+  mySids = mySids.filter((x) => x !== sid);
+  localStorage.setItem(SIDS_KEY, JSON.stringify(mySids));
+  if (sid === sessionId) {
+    // 删的是当前对话：直接开一个新的，别停在空壳上
+    currentItems = [];
+    paint([]);
+    updateMetrics([]);
+    $('sess-title').textContent = '新对话';
+    setHint('已删除这个对话');
+  }
+  loadSessions();
+}
+
+// ---------------- 统计抽屉 ----------------
+async function refreshGlobal() {
+  try {
+    // 两个接口一起取：/api/stats 是"跑了多少"，/api/cache 是"缓存怎么配的"。
+    // 拆开是后端的分工，页面没必要跟着分两次等待。
+    const [stats, cfg] = await Promise.all([
+      fetch('/api/stats?session_id=' + encodeURIComponent(sessionId) + '&recent_limit=40').then((r) => r.json()),
+      fetch('/api/cache').then((r) => r.json()).catch(() => null),
+    ]);
+    window.__stats = stats;
+    window.__cacheCfg = cfg;
+    if (stats.local_model) window.__localModel = stats.local_model;
+    renderDrawer(stats);
+  } catch (e) { /* 统计失败不影响聊天 */ }
+}
+
+function kv(k, v, sub) {
+  return `<div class="kv"><div class="k">${k}</div><div class="v">${v}${sub ? `<small> ${sub}</small>` : ''}</div></div>`;
+}
+
+function breakerText(b) {
+  if (!b) return '—';
+  if (b.disabled) return '未启用（纯云）';
+  if (b.open) return `已短路 ${b.cooldown_left_s}s`;
+  return '正常';
+}
+
+function renderDrawer(d) {
+  const s = d.summary || {};
+  const c = window.__cacheCfg || {};   // 阈值、后端、守卫开关都在这儿
+  const kb = d.kb || {};
+  const q = d.quota;
+  const recent = d.recent || [];
+  const saved = Math.round((s.saved_ratio || 0) * 1000) / 10;
+  let notes = [];
+  if (d.local_enabled === false) {
+    notes.push('线上版为纯云端模式：本地小模型跑在我自己的机器上，云端容器没有 GPU。'
+             + '路由、缓存、记忆、记账逻辑与本地版一致，只是"简单请求"由云端代答。');
+  }
+  if (q) notes.push(`今日演示额度 ${q.used}/${q.limit} 次`);
+
+  $('drawer-body').innerHTML = `
+    ${notes.length ? `<div class="note">${esc(notes.join(' · '))}</div>` : ''}
+
+    <div class="sec-t">全站累计（含所有访客）</div>
+    <div class="grid2">
+      ${kv('请求数', s.runs || 0)}
+      ${kv('累计成本', money(s.cost_cny, 4))}
+      ${kv('较全云端节省', saved + '%')}
+      ${kv('平均延迟', (s.avg_latency_ms || 0) + 'ms')}
+      ${kv('缓存命中', (s.cache_hits || 0) + ' 次', s.cache_hit_ratio ? `${(s.cache_hit_ratio * 100).toFixed(0)}%` : '')}
+      ${kv('门卫拦截', s.guard_blocks || 0, '次')}
+    </div>
+
+    <div class="sec-t">语义缓存</div>
+    <div class="grid2">
+      ${kv('缓存条目', c.entries != null ? c.entries : '—')}
+      ${kv('复用相似度线', c.threshold != null ? Number(c.threshold).toFixed(2) : '—')}
+      ${kv('向量后端', esc(c.embedder || '—'))}
+      ${kv('门卫', c.guard ? '开启' : '关闭')}
+      ${kv('命中省下', money(c.cost_saved_cny || 0, 4))}
+      ${kv('知识库版本', kb.chunks ? esc(String(c.kb_version || '—')).slice(0, 20) : '未建索引')}
+    </div>
+
+    <div class="sec-t">知识库（RAG）</div>
+    <div class="grid2">
+      ${kv('文档', (kb.docs != null ? kb.docs : '—') + ' 篇')}
+      ${kv('切块', (kb.chunks != null ? kb.chunks : '—') + ' 块')}
+    </div>
+
+    <div class="sec-t">本地模型熔断</div>
+    <div class="grid2">
+      ${kv('状态', esc(breakerText(d.local_breaker)))}
+      ${kv('连续失败', (d.local_breaker && d.local_breaker.fails) || 0)}
+    </div>
+
+    <div class="sec-t">本对话的请求明细</div>
+    ${recent.length ? `<table>
+      <thead><tr><th>时间</th><th>问题</th><th>路由</th><th>耗时</th><th>成本</th></tr></thead>
+      <tbody>${recent.map((x) => `
+        <tr>
+          <td>${esc((x.ts || '').slice(11))}</td>
+          <td>${esc((x.query || '').slice(0, 16))}${x.guard_blocked ? ' <span class="gd">已拦</span>' : ''}</td>
+          <td>${x.decided_by === 'cache' ? '缓存' : esc(x.route)}</td>
+          <td>${x.latency_ms}ms</td>
+          <td>${x.decided_by === 'cache' ? '¥0' : money(x.cost_cny)}</td>
+        </tr>`).join('')}</tbody></table>`
+      : '<div style="font-size:12px;color:#9b978d">这个对话还没有请求</div>'}
+  `;
+}
+
+$('open-stats').onclick = async () => {
+  openDrawer();
+  await refreshGlobal();
+};
+function openDrawer() { $('drawer').classList.add('on'); $('scrim').classList.add('on'); }
+function closeDrawer() { $('drawer').classList.remove('on'); $('scrim').classList.remove('on'); }
+$('close-drawer').onclick = closeDrawer;
+$('scrim').onclick = () => { closeDrawer(); closeSide(); };
+
+// 移动端侧栏
+function closeSide() { $('side').classList.remove('on'); $('scrim').classList.remove('on'); }
+$('menu').onclick = () => { $('side').classList.add('on'); $('scrim').classList.add('on'); };
+
+// ---------------- 清空类操作（页面内二次确认，嵌入式预览会拦掉 confirm 弹窗） ----------------
+function armed(btn, label, onConfirm) {
+  if (btn.dataset.arm !== '1') {
+    btn.dataset.arm = '1';
+    btn.dataset.label = btn.textContent;
+    btn.textContent = label;
+    btn.classList.add('danger');
+    setTimeout(() => {
+      if (btn.dataset.arm === '1') {
+        btn.dataset.arm = '0';
+        btn.textContent = btn.dataset.label;
+        btn.classList.remove('danger');
+      }
+    }, 3000);
+    return;
+  }
+  btn.dataset.arm = '0';
+  btn.textContent = btn.dataset.label;
   btn.classList.remove('danger');
-  btn.disabled = true;
+  onConfirm();
+}
+
+$('clear-sessions').onclick = (e) => armed(e.target, '再点一次确认', async () => {
   try {
     const r = await fetch('/api/sessions', { method: 'DELETE' });
     const d = await r.json();
-    sessionId = newSid();
-    localStorage.setItem(SID_KEY, sessionId);
-    renderSid();
-    renderTranscript([]);
-    $('result').classList.add('hidden');
-    $('hint').textContent = `已清空 ${d.deleted} 个会话`;
-    setTimeout(() => { $('hint').textContent = ''; }, 2500);
-    loadSessions();
-  } catch (e) {
-    $('hint').textContent = '清空失败：' + e;
-  } finally {
-    btn.disabled = false;
-  }
-};
+    mySids = [];
+    localStorage.setItem(SIDS_KEY, '[]');
+    startNewSession();
+    setHint(`已清空 ${d.deleted} 个对话`);
+  } catch (err) { setHint('清空失败：' + err, true); }
+});
 
-// 忘掉我：清空当前身份的长期记忆（短期会话不受影响）。二次确认同上。
-let forgetArmed = false;
-let forgetTimer = null;
-$('forget').onclick = async () => {
-  if (!forgetArmed) {
-    forgetArmed = true;
-    $('forget').textContent = '确认忘掉？';
-    $('forget').classList.add('danger');
-    $('hint').textContent = '将删除该身份的全部长期记忆（历史会话不受影响）';
-    forgetTimer = setTimeout(() => {
-      forgetArmed = false;
-      $('forget').textContent = '忘掉我';
-      $('forget').classList.remove('danger');
-      $('hint').textContent = '';
-    }, 3000);
-    return;
-  }
-  clearTimeout(forgetTimer);
-  forgetArmed = false;
-  $('forget').textContent = '忘掉我';
-  $('forget').classList.remove('danger');
-  try {
-    const r = await fetch('/api/memory/' + encodeURIComponent(userId), { method: 'DELETE' });
-    const d = await r.json();
-    $('hint').textContent = '已忘掉 ' + d.deleted + ' 条长期记忆';
-    setTimeout(() => { $('hint').textContent = ''; }, 2500);
-  } catch (e) {
-    $('hint').textContent = '操作失败：' + e;
-  }
-};
-
-// 清空统计：不用 window.confirm —— 嵌入预览（iframe 沙箱）会把弹窗拦掉，
-// 表现就是"点了没反应"。改成页面内二次确认：第一次点变成"再点一次确认"，3 秒后自动还原。
-let clearArmed = false;
-let clearTimer = null;
-function disarmClear() {
-  clearArmed = false;
-  $('clear').textContent = '清空统计';
-  $('clear').classList.remove('danger');
-}
-$('clear').onclick = async () => {
-  if (!clearArmed) {
-    clearArmed = true;
-    $('clear').textContent = '再点一次确认';
-    $('clear').classList.add('danger');
-    $('hint').textContent = '将删除全部记账记录，不可恢复';
-    clearTimer = setTimeout(() => { disarmClear(); $('hint').textContent = ''; }, 3000);
-    return;
-  }
-  clearTimeout(clearTimer);
-  disarmClear();
-  $('clear').disabled = true;
+$('clear-stats').onclick = (e) => armed(e.target, '再点一次确认', async () => {
   try {
     const r = await fetch('/api/clear', { method: 'POST' });
     const d = await r.json();
-    $('result').classList.add('hidden');
-    $('hint').textContent = '已清空 ' + d.deleted + ' 条记录';
-    setTimeout(() => { $('hint').textContent = ''; }, 2500);
-    refresh();
-  } catch (e) {
-    $('hint').textContent = '清空失败：' + e;
-  } finally {
-    $('clear').disabled = false;
-  }
-};
+    setHint(`已清空 ${d.deleted} 条记账`);
+    refreshGlobal();
+  } catch (err) { setHint('清空失败：' + err, true); }
+});
 
-renderSid();
-renderUid();
-refresh();
-loadSessions();
-loadTranscript();
+$('forget').onclick = (e) => armed(e.target, '确认忘掉？', async () => {
+  try {
+    const r = await fetch('/api/memory/' + encodeURIComponent(userId), { method: 'DELETE' });
+    const d = await r.json();
+    setHint(`已忘掉 ${d.deleted} 条长期记忆（对话本身还在）`);
+  } catch (err) { setHint('操作失败：' + err, true); }
+});
+
+// ---------------- 入口 ----------------
+document.querySelectorAll('.chip[data-q]').forEach((b) => {
+  b.onclick = () => { $('q').value = b.dataset.q; autoGrow(); $('q').focus(); };
+});
+document.querySelectorAll('.dcard').forEach((b) => {
+  b.onclick = () => { $('q').value = b.dataset.q || b.querySelector('.q').textContent; send(); };
+});
+
+$('send').onclick = send;
+$('q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+(async function boot() {
+  await loadSessions();
+  // 先拿阈值/缓存配置：历史消息里的"门卫拦截"要写出"比 0.35 的复用线还高"，
+  // 这个数得先到，否则第一屏会出现"相似度 0.906 已超过复用线"这种含糊表述。
+  await refreshGlobal();
+  await loadCurrent();
+  if (new URLSearchParams(location.search).get('panel') === '1') openDrawer();
+})();
 </script>
 </body>
 </html>

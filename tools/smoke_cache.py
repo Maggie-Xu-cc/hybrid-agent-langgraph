@@ -180,6 +180,21 @@ for q, c, tag in cases_ok:
     check(f"放行：{tag}", ok, why)
 
 # ----------------------------------------------------------------
+print("\n== 9. 门卫拦截的语义边界 ==")
+# "拦截"只对"过了相似度线、但载荷不同"的候选成立。
+# 一个相似度远低于阈值的问题被报成拦截，就是在编故事——而这个错真的发生过：
+# 早期版本先跑守卫再比阈值，于是任何两条都算"被拦下"，页面上到处是假拦截。
+cache.put("把 3 点 15 分转换成 24 小时制的数字写法", "03:15", "m", "easy")
+blocked = cache.lookup_ex("把 3 点 45 分转换成 24 小时制的数字写法")
+check("过线但参数不同 → 报拦截", blocked["hit"] is None and bool(blocked["blocked"]),
+      f"{blocked['blocked']} score={blocked['score']:.3f}")
+check("拦截时带出相似度（用于展示）", blocked["score"] > 0.8, f"score={blocked['score']:.3f}")
+
+loose = cache.lookup_ex("用三句话解释什么是语义缓存，以及它最大的风险是什么")
+check("压根不像 → 不报拦截", loose["hit"] is None and not loose["blocked"],
+      f"score={loose['score']:.3f} blocked={loose['blocked']!r}")
+
+# ----------------------------------------------------------------
 print(f"\n结果：{len(PASS)} 通过，{len(FAIL)} 失败")
 if FAIL:
     print("失败项：")

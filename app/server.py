@@ -124,8 +124,15 @@ def api_chat(body: ChatIn) -> dict:
 
 
 @app.get("/api/stats")
-def api_stats() -> dict:
-    return {"summary": store.stats(), "recent": store.recent(8),
+def api_stats(session_id: str | None = None, recent_limit: int = 30) -> dict:
+    """统计 + 最近请求。
+
+    summary 是全站累计（含别人的请求），页面标注为"全站"；
+    recent 传 session_id 就只给这个会话的记录——混在一起显示既看不懂，
+    也会让人误以为别人的对话是自己的。
+    """
+    return {"summary": store.stats(),
+            "recent": store.recent(recent_limit, session_id=session_id),
             "cache": cache.stats() if settings.enable_cache else None,
             # 知识库状态：搜了几篇、多少块。为空说明没建索引，检索层在空转
             "kb": ({"enabled": True, **rag.stats()} if settings.enable_rag
@@ -135,6 +142,9 @@ def api_stats() -> dict:
             # 本地模型层是否启用。云端部署时一定是 False——页面据此说明
             # "线上版走纯云端"，避免访客以为自己看到的是混合路由的结果。
             "local_enabled": not settings.disable_local,
+            # 本地模型名：页面要据此判断"这一轮是不是本地小模型答的"
+            # （历史记录里只有 model 字段，layer 是当场算出来的，得给个判定依据）
+            "local_model": settings.local_model,
             # 演示额度：公网版看"还剩多少次"，本地版是 None（不限制）
             "quota": ({"limit": settings.demo_quota_per_day,
                        "used": guard.today_used()}
@@ -190,11 +200,18 @@ def api_sessions(limit: int = 20) -> dict:
 
 @app.get("/api/sessions/{session_id}")
 def api_session_detail(session_id: str) -> dict:
-    """某个会话的消息记录，用于切换会话时回显。"""
+    """某个会话的消息记录 + 每一轮的决策元信息。
+
+    消息本身来自 checkpointer（原文），元信息来自记账表（走了哪层、花了多少、
+    有没有被门卫拦下）。分开存是刻意的：一个记"说了什么"，一个记"花了多少"，
+    合并归档反而会互相拖累。这里按顺序对起来返回，页面就能一句话带出处。
+    """
     if not USE_GRAPH or get_session_messages is None:
-        return {"session_id": session_id, "messages": []}
+        return {"session_id": session_id, "messages": [], "turns": []}
     return {"session_id": session_id,
-            "messages": get_session_messages(session_id)}
+            "messages": get_session_messages(session_id),
+            # 记账表按 id 倒序取，再反转成时间正序，和消息顺序一致
+            "turns": list(reversed(store.recent(200, session_id=session_id)))}
 
 
 @app.delete("/api/sessions/{session_id}")

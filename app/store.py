@@ -13,16 +13,26 @@ CREATE TABLE IF NOT EXISTS runs (
     query TEXT NOT NULL,                     -- 原始问题
     route TEXT NOT NULL,                     -- 判定结果 easy/hard
     reason TEXT,                             -- 判定理由
-    decided_by TEXT,                         -- 谁判定的：rule/model/default
+    decided_by TEXT,                         -- 谁判定的：rule/model/default/cache
     model TEXT,                              -- 模型
     latency_ms INTEGER,                      -- 端到端延迟
     tokens_in INTEGER,                       -- 输入 token
     tokens_out INTEGER,                      -- 输出 token
     cost_cny REAL,                           -- 实付成本
     baseline_cost_cny REAL,                  -- 全云端基线成本
-    escalated INTEGER DEFAULT 0              -- 是否触发升级重答
+    escalated INTEGER DEFAULT 0,             -- 是否触发升级重答
+    session_id TEXT DEFAULT '',              -- 哪个会话产生的：页面按会话分开显示
+    guard_blocked TEXT DEFAULT '',           -- 门卫拒绝原因（空 = 没被拦）
+    cache_score REAL DEFAULT 0               -- 本轮最高缓存相似度（含被拦下的候选）
 );
 """
+
+# 老库补列：SQLite 的 ALTER TABLE ADD COLUMN 很轻，不需要重建表
+_MIGRATIONS = (
+    ("session_id", "TEXT DEFAULT ''"),
+    ("guard_blocked", "TEXT DEFAULT ''"),
+    ("cache_score", "REAL DEFAULT 0"),
+)
 
 
 def _conn() -> sqlite3.Connection:
@@ -41,6 +51,10 @@ def init() -> None:
         except sqlite3.OperationalError:
             pass
         conn.executescript(SCHEMA)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        for name, decl in _MIGRATIONS:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
 
 
 @with_retry
@@ -56,12 +70,16 @@ def record(
     cost: float,
     baseline_cost: float,
     escalated: bool,
+    session_id: str = "",
+    guard_blocked: str = "",
+    cache_score: float = 0.0,
 ) -> None:
     with _conn() as conn:
         conn.execute(
             "INSERT INTO runs (ts, query, route, reason, decided_by, model, latency_ms,"
-            " tokens_in, tokens_out, cost_cny, baseline_cost_cny, escalated)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " tokens_in, tokens_out, cost_cny, baseline_cost_cny, escalated,"
+            " session_id, guard_blocked, cache_score)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
                 query[:500],
@@ -75,6 +93,9 @@ def record(
                 round(cost, 6),
                 round(baseline_cost, 6),
                 1 if escalated else 0,
+                session_id,
+                guard_blocked,
+                round(cache_score or 0, 4),
             ),
         )
 
@@ -92,7 +113,10 @@ def stats() -> dict:
             "SELECT COUNT(*) n, COALESCE(SUM(cost_cny),0) cost,"
             " COALESCE(SUM(baseline_cost_cny),0) base,"
             " COALESCE(AVG(latency_ms),0) lat,"
-            " COALESCE(SUM(escalated),0) esc FROM runs"
+            " COALESCE(SUM(escalated),0) esc,"
+            # 门卫拦截次数：不是失败，是拦下了"字面很像但参数不同"的复用
+            " COALESCE(SUM(CASE WHEN guard_blocked != '' THEN 1 ELSE 0 END),0) guarded"
+            " FROM runs"
         ).fetchone()
         by_route = {
             r["route"]: r["n"]
@@ -132,14 +156,22 @@ def stats() -> dict:
         "cache_hits": by_layer.get("cache", {}).get("count", 0),
         "cache_hit_ratio": round(by_layer.get("cache", {}).get("count", 0) / total, 4)
         if total else 0.0,
+        "guard_blocks": int(row["guarded"] or 0),
     }
 
 # 给演示页面底部“最近 10 条调用记录”
-def recent(limit: int = 10) -> list[dict]:
+def recent(limit: int = 10, session_id: str | None = None) -> list[dict]:
+    """最近请求。传 session_id 就只返回该会话的——页面按会话分开显示，
+    全局混在一起既看不懂，也会让人以为别人的对话是自己的。"""
+    sql = ("SELECT ts, query, route, decided_by, latency_ms, cost_cny,"
+           " baseline_cost_cny, escalated, session_id, guard_blocked, cache_score"
+           " FROM runs")
+    args: list = []
+    if session_id is not None:
+        sql += " WHERE session_id = ?"
+        args.append(session_id)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT ts, query, route, decided_by, latency_ms, cost_cny, escalated"
-            " FROM runs ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(sql, args).fetchall()
     return [dict(r) for r in rows]

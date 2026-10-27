@@ -24,3 +24,5 @@ checkpoints.db
 # 本地向量模型（91MB 权重，用 tools/fetch_model.py 下载，不入库）
 models/
 .tmpdiag/
+.tmpui/
+.tmpreal/

@@ -84,6 +84,7 @@ class AgentState(TypedDict, total=False):
     query: str
     force_route: str | None
     user_id: str  # 长期记忆的身份键；空 = 不启用记忆（评测/匿名）
+    session_id: str  # 会话键（记账时带上，页面按会话分开看）
     history: list[dict]  # 多轮历史（checkpointer 持久化）
     facts: dict  # 长期记忆召回的用户事实（load_memory 注入）
     summary: str  # 早前对话的压缩摘要（bookkeep 生成，跨轮持久化）
@@ -102,6 +103,9 @@ class AgentState(TypedDict, total=False):
     cache_hit: bool  # 语义缓存是否命中（cache_lookup 节点判定）
     cache_score: float  # 命中时的相似度
     cache_cost: float  # 命中条目当初生成时花的钱（用来算"省了多少"）
+    cache_blocked: str  # 门卫拒绝原因（空 = 没被拦）。未命中也要带出去，这是演示重点
+    cache_blocked_text: str  # 被拦下的那条缓存原文
+    cache_top_score: float  # 全场最高相似度（含被拦的候选）
     use_cache: bool  # 本轮是否启用缓存（评测时关掉，避免污染对照实验）
     rag_chunks: list  # 检索到的相关片段（retrieve 节点，注入 prompt 用）
     rag_hit: bool  # 本轮是否检索到资料
@@ -153,13 +157,24 @@ def cache_lookup_node(state: AgentState) -> dict:
     """
     if not state.get("use_cache", settings.enable_cache):
         return {"cache_hit": False}
-    hit = cache.lookup(state["query"], kb_version=rag.version())
+    look = cache.lookup_ex(state["query"], kb_version=rag.version())
+    hit = look["hit"]
     if not hit:
-        return {"cache_hit": False}
+        # 没命中也要把"本来差点命中、被门卫拦下"带出去：
+        # 图上要能看见"相似度 0.906 但数字不同，所以拒绝复用"，
+        # 否则页面只会显示"走了云端"，看不出系统刚避免了一次错答。
+        return {"cache_hit": False, "cache_blocked": look.get("blocked", ""),
+                "cache_blocked_text": look.get("blocked_text", ""),
+                "cache_top_score": look.get("score", 0.0)}
     return {
         "cache_hit": True,
         "cache_score": hit["score"],
         "cache_cost": hit.get("cost", 0.0),
+        # 命中时不报"被拦下的别条候选"：页面要回答的是"这一轮为什么这样走"，
+        # 混进另一条被拒的候选只会让人看不懂。
+        "cache_blocked": "",
+        "cache_blocked_text": "",
+        "cache_top_score": hit["score"],
         "started": time.perf_counter(),  # 命中路径不经过 route，这里补上计时起点
         "answer": hit["answer"],
         "model_used": f"{hit['model']} (cache)",
@@ -410,6 +425,13 @@ def bookkeep_node(state: AgentState) -> dict:
 
     store.record(
         query=state["query"],
+        # 带上 session_id：页面要按会话分开显示"这个对话里发生过什么"，
+        # 混在一张全局列表里既看不懂也分不清是谁的。
+        session_id=state.get("session_id", ""),
+        guard_blocked=state.get("cache_blocked") or "",
+        # 本轮看到过的最高相似度：命中时是被复用的那条，被拦时是差点被复用的那条。
+        # 页面靠它讲清楚"为什么这样走"，所以必须落库，否则历史记录只剩一个结论。
+        cache_score=state.get("cache_top_score") or 0,
         route=route["difficulty"],
         reason=route["reason"],
         decided_by=route["by"],
@@ -451,6 +473,14 @@ def bookkeep_node(state: AgentState) -> dict:
         "degraded": state.get("degraded", False),
         "cache_hit": bool(state.get("cache_hit")),
         "cache_score": round(state.get("cache_score") or 0, 3),
+        # 门卫拦截：这一轮差点抄到一条"字面很像但参数不同"的答案，被字符串规则拒绝了。
+        # 它不是失败，是拦住了一次错答——页面上要单独标出来，不能混在"走了云端"里。
+        "cache_guard": {
+            "blocked": bool(state.get("cache_blocked")),
+            "reason": state.get("cache_blocked") or "",
+            "matched": state.get("cache_blocked_text") or "",
+            "score": round(state.get("cache_top_score") or 0, 3),
+        },
         # 上下文工程的可观测性：注入了哪些记忆、裁了多少历史
         "memory": {
             "enabled": bool(state.get("user_id")),
@@ -648,6 +678,7 @@ def run_graph(query: str, session_id: str = "default",
     config = {"configurable": {"thread_id": session_id}}
     out = app.invoke(
         {"query": query, "force_route": force_route, "user_id": user_id,
+         "session_id": session_id,
          "use_cache": settings.enable_cache if use_cache is None else use_cache,
          "use_rag": settings.enable_rag if use_rag is None else use_rag},
         config,
