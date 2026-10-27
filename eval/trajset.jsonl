@@ -1,0 +1,13 @@
+{"q": "记账表里一共有多少条记录？", "expect_tools": true, "names": ["sql_query"], "min_calls": 1, "max_calls": 3, "category": "统计查询", "note": "最典型的该动手：不查库就只能瞎编一个数字"}
+{"q": "数据库里平均每次请求花多少钱？算到小数点后两位", "expect_tools": true, "names": ["sql_query", "run_python"], "min_calls": 1, "max_calls": 4, "category": "统计查询", "note": "names 是任选关系：查库算出来或查出来再算都算对"}
+{"q": "帮我算一下 2 的 20 次方是多少", "expect_tools": true, "names": ["run_python"], "min_calls": 1, "max_calls": 3, "category": "计算", "note": "模型心算大数容易错，跑代码才算过程可信"}
+{"q": "算算 0.1 加 0.2 到底等不等于 0.3，用代码验证一下", "expect_tools": true, "names": ["run_python"], "min_calls": 1, "max_calls": 3, "category": "计算", "note": "浮点陷阱，正确答案依赖真的跑一遍"}
+{"q": "打开这个链接 https://example.com 看看网页内容", "expect_tools": true, "names": ["fetch_url"], "min_calls": 1, "max_calls": 3, "category": "抓网页", "note": "链接内容模型不可能知道，必须抓"}
+{"q": "便签里有哪些关于开题的？", "expect_tools": true, "names": ["notes_search", "notes_list"], "min_calls": 1, "max_calls": 4, "category": "便签·查", "note": "MCP 外部工具：便签数据在另一个进程里，不连过去就是编"}
+{"q": "帮我在便签里记一条：轨迹评测专用，可删除", "expect_tools": true, "names": ["notes_add"], "min_calls": 1, "max_calls": 3, "category": "便签·写", "note": "写操作：评测替用户点头（resume approve），顺便验证确认链路不挡评测"}
+{"q": "你好呀，今天状态怎么样？", "expect_tools": false, "category": "寒暄", "note": "最基线的不该动手"}
+{"q": "红烧肉怎么做才软糯不腻？", "expect_tools": false, "category": "常识问答", "note": "模型自己会的知识，动手纯属浪费钱"}
+{"q": "写一首关于秋天的四行短诗", "expect_tools": false, "category": "创作", "note": "创作类，任何工具都帮不上忙"}
+{"q": "SQL 和 NoSQL 有什么区别？", "expect_tools": false, "category": "陷阱·词面撞车", "note": "问题里有「SQL」二字，触发词会命中「要查库」——但它问的是概念区别，动手查库就是误报。专门抓规则路由的假阳性"}
+{"q": "别查资料了，直接凭你自己的理解讲讲什么是向量数据库", "expect_tools": false, "category": "陷阱·词面撞车", "note": "「数据库」撞了触发词，且用户明确说了别查——看触发词层和模型层谁听用户的"}
+{"q": "项目文档里语义缓存是怎么配置的？", "expect_tools": false, "category": "RAG 边界", "note": "该走检索不该动手：资料就在本地知识库里，检索比工具便宜"}
