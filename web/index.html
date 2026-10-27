@@ -143,6 +143,11 @@
   .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
   .meta b { color: #4a4842; font-weight: 600; }
   .answer { white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+  .answer b { font-weight: 600; }
+  .answer code.ic {
+    background: #f4f2ec; border: 1px solid var(--line); border-radius: 4px;
+    padding: 0 4px; font-size: 12.5px; font-family: ui-monospace, Consolas, monospace;
+  }
   .answer.pending { color: var(--muted); }
 
   /* 门卫拦截：整个演示里最该被看见的一块 */
@@ -514,6 +519,16 @@ function buildStream(messages, turns) {
   return out;
 }
 
+// 只渲染两种行内格式：**加粗** 和 `行内代码`。模型爱输出 markdown，直接当纯文本
+// 会把星号照抄给用户。先 esc 再做替换，所以不存在把用户内容当 HTML 执行的路径——
+// 这一步的顺序不能反，反了就是 XSS。
+function mdInline(text) {
+  let h = esc(text || '');
+  h = h.replace(/`([^`\n]+)`/g, '<code class="ic">$1</code>');
+  h = h.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  return h;
+}
+
 function nodeHtml(item) {
   if (item.role === 'user') {
     return `<div class="msg user"><div class="bubble">${esc(item.content)}</div></div>`;
@@ -522,7 +537,7 @@ function nodeHtml(item) {
   return `
     <div class="msg ai"><div class="card">
       <div class="ai-head">${badgeHtml(m)}</div>
-      <div class="answer">${esc(item.content)}</div>
+      <div class="answer">${mdInline(item.content)}</div>
       ${guardBox(m)}
       ${metaLine(m)}
       ${item.extra || ''}
