@@ -118,18 +118,27 @@ python tools/capacity_plan.py --gpu-tps <n>
 ## 6. 一条命令跑通（推荐）
 
 ```bash
-# 1) 起服务：自动判环境（docker / pip vllm），缺权重自动下
-bash deploy/start_vllm.sh
+# 1) 起本地服务：按卡选一种
+python deploy/local_server.py     # AUP / 装不上 vLLM：transformers + 标准库 HTTP，默认 8000
+bash deploy/start_vllm.sh         # 有可用 vLLM 的卡：自动判环境、缺权重自动下
 
-# 2) 另开一个 tmux 窗口，配 .env
-cp .env.example .env && nano .env      # LOCAL_MODEL、CLOUD_API_KEY、MOCK_MODE=0
+# 2) 另开一个终端（tmux 新窗口），配 .env
+cp .env.example .env && nano .env
+#   LOCAL_MODEL 要和服务端打印的模型名一字不差：
+#     local_server.py 默认 → Qwen/Qwen2.5-1.5B-Instruct
+#   CLOUD_API_KEY、MOCK_MODE=0
 
 # 3) 自检 -> 一键采集
 python tools/preflight.py
 python deploy/run_all.py
 ```
 
-`run_all.py` 产出全部落进 `docs/evidence/`，汇总在 `RESULTS.md`。
+`run_all.py` 依次跑：并发压测 → 三策略评测 → **语义缓存基准** → 算力重算，
+产物全部落进 `docs/evidence/`，汇总在 `RESULTS.md`（缓存那张表就在第三节）。
+只想要缓存数据可以单独跑 `python tools/cache_bench.py`。
+
+首次跑 `local_server.py` 会下载权重，先设镜像：
+`export HF_ENDPOINT=https://hf-mirror.com`。
 
 ## 7. 没有 GPU 时的降级方案
 

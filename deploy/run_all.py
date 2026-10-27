@@ -107,6 +107,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="评测只跑前 N 条（0 = 全量）")
     parser.add_argument("--skip-bench", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument("--skip-cache", action="store_true", help="跳过语义缓存基准")
     parser.add_argument("--quick", action="store_true", help="跳过 8k 长上下文对照压测")
     parser.add_argument("--concurrency", default="1,4,8")
     parser.add_argument("--num-prompts", type=int, default=16)
@@ -133,7 +134,9 @@ def main() -> int:
     ok, msg = check_service()
     print(f"  服务检查：{'✓' if ok else '✗'} {msg}")
     if not ok:
-        print("\n先把 vLLM 起起来：bash deploy/start_vllm.sh")
+        print("\n先把本地服务起起来：")
+        print("  AUP（无 vLLM）：python deploy/local_server.py")
+        print("  有 vLLM 的卡：  bash deploy/start_vllm.sh")
         return 1
 
     # ---------- 压测 ----------
@@ -175,6 +178,11 @@ def main() -> int:
             cmd += ["--limit", str(args.limit)]
         run_step(cmd, EVID / "eval.log", f"三策略评测（{args.limit or '全量'} 条）")
 
+    # ---------- 语义缓存基准 ----------
+    if not args.skip_cache:
+        run_step([py, "tools/cache_bench.py", "--quiet"],
+                 EVID / "cache_bench.log", "语义缓存基准（基线/精确命中/语义命中）")
+
     # ---------- 算力重算 ----------
     run_step(
         [py, "tools/capacity_plan.py",
@@ -188,6 +196,7 @@ def main() -> int:
     bench_txt = (EVID / "bench.log").read_text(encoding="utf-8") if (EVID / "bench.log").exists() else ""
     bench_long = (EVID / "bench_long.log").read_text(encoding="utf-8") if (EVID / "bench_long.log").exists() else ""
     eval_txt = (EVID / "eval.log").read_text(encoding="utf-8") if (EVID / "eval.log").exists() else ""
+    cache_txt = (EVID / "cache_bench.log").read_text(encoding="utf-8") if (EVID / "cache_bench.log").exists() else ""
     cap_txt = (EVID / "capacity.md").read_text(encoding="utf-8") if (EVID / "capacity.md").exists() else ""
 
     results = f"""# 云端预演结果汇总（自动生成）
@@ -209,11 +218,18 @@ def main() -> int:
 > 用途：PROPOSAL 8.5 节承诺的「上下文长度对吞吐的敏感性分析」。
 > 若长上下文吞吐明显下降，报告里要说明容量测算为何按低值取。
 
-## 三、三策略评测
+## 三、语义缓存基准
+
+{extract_table(cache_txt) if cache_txt else "（本次未跑）"}
+
+> 第 1 遍是基线（缓存空）；第 2 遍相同问题走精确命中；第 3 遍换说法测语义召回。
+> 第 2 遍命中率的上限是 easy 用例占比——hard 默认不缓存（`CACHE_CACHE_HARD=1` 可开）。
+
+## 四、三策略评测
 
 {extract_table(eval_txt)}
 
-## 四、算力需求测算
+## 五、算力需求测算
 
 {cap_txt}
 
