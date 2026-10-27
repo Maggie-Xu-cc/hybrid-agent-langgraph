@@ -111,6 +111,8 @@
       <span id="hint" class="sub" style="margin:0"></span>
     </div>
     <div class="sub" style="margin:8px 0 0">当前会话 <b id="sid"></b> · 同一会话内的多轮请求共享上下文</div>
+    <div class="sub" style="margin:4px 0 0">长期记忆身份 <b id="uid"></b> · 跨会话记住你的关键事实
+      <button id="forget" class="ghost">忘掉我</button></div>
   </div>
 
   <div class="card" id="sessions-card" style="margin-top:14px">
@@ -177,6 +179,12 @@ function newSid() {
 let sessionId = localStorage.getItem(SID_KEY) || newSid();
 localStorage.setItem(SID_KEY, sessionId);
 function renderSid() { $('sid').textContent = sessionId; }
+
+// 长期记忆身份：与 session_id 独立——"新会话"只是换对话，不会忘掉你是谁。
+const UID_KEY = 'hybrid_agent_uid';
+let userId = localStorage.getItem(UID_KEY) || ('user-' + newSid());
+localStorage.setItem(UID_KEY, userId);
+function renderUid() { $('uid').textContent = userId; }
 
 // ---------------- 会话列表 / 历史回显 ----------------
 const esc = (s) => String(s == null ? '' : s)
@@ -317,7 +325,7 @@ async function send() {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, session_id: sessionId })
+      body: JSON.stringify({ query, session_id: sessionId, user_id: userId })
     });
     const d = await r.json();
     if (d.error) { $('hint').textContent = d.error; return; }
@@ -334,6 +342,17 @@ async function send() {
     $('saved').textContent = (saved * 100).toFixed(0) + '%';
     $('answer').textContent = d.answer || '(空回答)';
     $('engine').textContent = d.engine || '-';
+    // 上下文工程可观测：本轮注入/记住了什么
+    const mem = d.memory || {};
+    let memNote = [];
+    if (mem.facts_injected && mem.facts_injected.length)
+      memNote.push('注入记忆: ' + mem.facts_injected.join(', '));
+    if (mem.facts_saved && mem.facts_saved.length)
+      memNote.push('新记住: ' + mem.facts_saved.join(', '));
+    if (mem.summary_used) memNote.push('使用摘要');
+    $('hint').textContent = memNote.join(' · ');
+    setTimeout(() => { if ($('hint').textContent.startsWith('注入记忆') ||
+        $('hint').textContent.startsWith('新记住')) $('hint').textContent = ''; }, 4000);
     $('hint').textContent = '';
     refresh();
     loadTranscript();
@@ -400,6 +419,37 @@ $('clear-sessions').onclick = async () => {
   }
 };
 
+// 忘掉我：清空当前身份的长期记忆（短期会话不受影响）。二次确认同上。
+let forgetArmed = false;
+let forgetTimer = null;
+$('forget').onclick = async () => {
+  if (!forgetArmed) {
+    forgetArmed = true;
+    $('forget').textContent = '确认忘掉？';
+    $('forget').classList.add('danger');
+    $('hint').textContent = '将删除该身份的全部长期记忆（历史会话不受影响）';
+    forgetTimer = setTimeout(() => {
+      forgetArmed = false;
+      $('forget').textContent = '忘掉我';
+      $('forget').classList.remove('danger');
+      $('hint').textContent = '';
+    }, 3000);
+    return;
+  }
+  clearTimeout(forgetTimer);
+  forgetArmed = false;
+  $('forget').textContent = '忘掉我';
+  $('forget').classList.remove('danger');
+  try {
+    const r = await fetch('/api/memory/' + encodeURIComponent(userId), { method: 'DELETE' });
+    const d = await r.json();
+    $('hint').textContent = '已忘掉 ' + d.deleted + ' 条长期记忆';
+    setTimeout(() => { $('hint').textContent = ''; }, 2500);
+  } catch (e) {
+    $('hint').textContent = '操作失败：' + e;
+  }
+};
+
 // 清空统计：不用 window.confirm —— 嵌入预览（iframe 沙箱）会把弹窗拦掉，
 // 表现就是"点了没反应"。改成页面内二次确认：第一次点变成"再点一次确认"，3 秒后自动还原。
 let clearArmed = false;
@@ -436,6 +486,7 @@ $('clear').onclick = async () => {
 };
 
 renderSid();
+renderUid();
 refresh();
 loadSessions();
 loadTranscript();

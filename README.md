@@ -37,17 +37,44 @@
 
 ## LangGraph 编排（v1.1）
 
-主流程已迁移到 LangGraph `StateGraph`（`app/graph.py`），行为与原显式流程（`app/agent.py`，保留为基线）完全一致：
+主流程迁移到 LangGraph `StateGraph`（`app/graph.py`），行为与原显式流程（`app/agent.py`，保留为基线）完全一致：
 
 ```
-route ──easy──▶ local_answer ──▶ self_check ──需升级──▶ escalate ──▶ bookkeep ──▶ END
-  └──hard──▶ cloud_answer ─────────────────────────────────────────▶ bookkeep
+START ─▶ load_memory ─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
+                              │                               │                        │
+                              └──hard──▶ cloud_answer         └─通过─▶ bookkeep ─▶ save_memory ─▶ END
+                                         (cloud_answer ─────────────▶ bookkeep)
 ```
 
 - 路由逻辑 `router.decide()` 原样保留，从"函数调用"变成**条件边**；记账集中在 `bookkeep` 节点
-- **会话记忆**：`SqliteSaver` checkpointer 按 `session_id` 持久化对话状态（`checkpoints.db`），天然支持多轮对话；历史带滑动窗口（发给模型最近 8 条）
+- **会话记忆（短期）**：`SqliteSaver` checkpointer 按 `session_id` 持久化对话状态（`checkpoints.db`），天然支持多轮对话
 - 双链路可切换：`ENABLE_LANGGRAPH=1/0`，两条链路跑同一份评测集可做对比实验
 - 冒烟测试（离线）：`python tools/smoke_langgraph.py`
+
+### 上下文工程（v1.2）
+
+`app/context.py` 按 token 预算组装 prompt，而不是简单截断：
+
+```
+system 人设（必留）＋ 长期记忆事实（≤200 tok）＋ 早前摘要（≤300 tok）＋ 最近对话（≤800 tok）＋ 本轮问题（必留）
+```
+
+- token 估算用字数折算（中文 0.75/字、其它 0.3/字符），不为估算引入 tokenizer 依赖
+- 记忆块装不下时**整块丢弃**，不塞半截；每轮的注入统计（各部分 token、裁剪条数）随响应返回（`memory.ctx_tokens`），上下文是可观测的
+
+### 长期记忆（v1.2）
+
+`app/memory.py` 跨会话记住用户的关键事实，`session_id`（短期）与 `user_id`（长期）两个键独立：**新会话不会忘掉用户，新身份读不到别人的会话**。
+
+- 抽取用正则（`我叫X / 我在做X / 我最喜欢的X是Y / 记住：X`），带疑问句过滤（"我在做什么项目？"不会把"什么项目"记成事实）；每轮的判断成本是 0
+- 存储 SQLite 单表 `(user_id, fact_key, fact_value)`，覆盖旧值即记忆更新；事实量级小，全量召回就是最优检索，暂不需要向量库
+- **历史摘要压缩**：对话超过 20 条时，把最老的部分用本地小模型压成摘要（失败退化为逐条截取），保留最近 12 条——历史的上限从"硬丢弃"变成"软压缩"，摘要调用的 token 照样记账
+
+前端身份存 `localStorage`（默认生成，可与 `session_id` 分别重置）；「忘掉我」按钮清空当前身份的长期记忆，历史会话不受影响。
+
+- `GET /api/memory/{user_id}` → 查看已记住的事实
+- `DELETE /api/memory/{user_id}` → 清空某身份的长期记忆
+- 冒烟测试（离线，26 项断言）：`python tools/smoke_memory.py`
 
 前端每个浏览器会话自动生成 `session_id`（存 `localStorage`，刷新不丢），页面上的「新会话」按钮换 id 即隔离上下文；后端不传时默认 `default`。
 
@@ -172,9 +199,11 @@ app/
   router.py    三层难度路由
   agent.py     基线主流程（显式三步，ENABLE_LANGGRAPH=0 时使用）
   graph.py     LangGraph 编排主流程（默认）：条件边 + 自检升级 + 记账 + 会话记忆
+  context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/摘要/历史）
+  memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
   store.py     SQLite 记录与统计
   server.py    FastAPI 服务（按开关选择链路，返回 engine 字段）
-web/index.html 演示页面（自动生成并复用 session_id，「新会话」按钮切换）
+web/index.html 演示页面（自动生成并复用 session_id 与 user_id，「新会话」/「忘掉我」）
 eval/
   testset.jsonl  标注测试集
   run_eval.py    三策略对比（--engine plain|graph|both 选链路，both 会逐条比对一致性）
@@ -182,6 +211,7 @@ tools/
   capacity_plan.py   算力需求测算（三阶段预算）
   bench_throughput.py 并发压测（测单卡 tok/s）
   smoke_langgraph.py  LangGraph 链路冒烟测试（离线）
+  smoke_memory.py     记忆与上下文冒烟测试（离线，26 项断言）
 deploy/
   start_vllm.sh  环境判定 + 下权重 + 起 vLLM（换独立显卡后的备用脚本）
   run_all.py     一键采集：压测 + 评测 + 算力重算 + 归档

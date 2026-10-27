@@ -18,7 +18,14 @@
 
 相比 agent.py 新增的能力：
 - checkpointer 按 session_id 持久化会话状态，天然支持多轮对话；
-- history 带滑动窗口裁剪（上下文工程的第一步，阶段二会加摘要压缩）。
+- 上下文工程（阶段二）：按 token 预算组装 prompt，长期记忆注入、历史摘要压缩。
+
+图的结构（阶段二后）：
+
+    START ─▶ load_memory ─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
+                                 │                                │                         │
+                                 └──hard──▶ cloud_answer          └─通过─▶ bookkeep ─▶ save_memory ─▶ END
+                                            (cloud_answer ─────────────────▶ bookkeep)
 """
 
 from __future__ import annotations
@@ -32,7 +39,7 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from . import store
+from . import context, memory, store
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
 from .router import Route, decide
@@ -51,9 +58,15 @@ ESCALATE_MARKERS = [
     "没有足够信息",
 ]
 
-# 会话历史滑动窗口：发给模型的最近 N 条 + 持久化的最多 M 条
+# 会话历史：超过 20 条时把最老的部分压缩成摘要（软上限，不是硬丢弃）
 CONTEXT_WINDOW_MESSAGES = 8
 MAX_HISTORY_MESSAGES = 20
+SUMMARY_KEEP_MESSAGES = 12        # 压缩后保留的最近消息条数
+
+SUMMARIZE_PROMPT = (
+    "请把以下多轮对话压缩成一段不超过120字的中文摘要，"
+    "保留用户的关键事实（身份、偏好、在做什么）和重要结论，不要评论。\n\n对话：\n"
+)
 
 # checkpointer 的落盘位置。会话列表也读这个库，所以统一成一个常量，避免两处路径漂移。
 CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", "checkpoints.db")
@@ -64,8 +77,12 @@ class AgentState(TypedDict, total=False):
 
     query: str
     force_route: str | None
+    user_id: str  # 长期记忆的身份键；空 = 不启用记忆（评测/匿名）
     history: list[dict]  # 多轮历史（checkpointer 持久化）
+    facts: dict  # 长期记忆召回的用户事实（load_memory 注入）
+    summary: str  # 早前对话的压缩摘要（bookkeep 生成，跨轮持久化）
     messages: list[dict]  # 本轮实际发给模型的消息
+    ctx_stats: dict  # 上下文组装统计（各部分 token、裁剪条数）
     route: dict  # {"difficulty","reason","by","latency_ms","tokens_in","tokens_out"}
     answer: str
     model_used: str
@@ -86,18 +103,28 @@ def _needs_escalation(text: str) -> bool:
     return any(marker in text for marker in ESCALATE_MARKERS)
 
 
-def _build_messages(state: AgentState) -> list[dict]:
-    """system + 滑动窗口内的历史 + 本轮提问。"""
-    history = state.get("history") or []
-    trimmed = history[-CONTEXT_WINDOW_MESSAGES:]
-    return [
-        {"role": "system", "content": SYSTEM},
-        *trimmed,
-        {"role": "user", "content": state["query"]},
-    ]
+def _build_messages(state: AgentState, query: str) -> tuple[list[dict], dict]:
+    """按 token 预算组装 prompt：system + 记忆 + 摘要 + 最近历史 + 本轮提问。"""
+    return context.build_messages(
+        system=SYSTEM,
+        facts=state.get("facts") or {},
+        summary=state.get("summary") or "",
+        history=state.get("history") or [],
+        query=query,
+    )
 
 
 # ---------------- 节点 ----------------
+
+def load_memory_node(state: AgentState) -> dict:
+    """长期记忆召回：按 user_id 取用户事实，供 route 组 prompt 时注入。
+
+    user_id 为空（评测/匿名请求）时返回空 facts——保证与基线链路行为一致。
+    """
+    user_id = state.get("user_id") or ""
+    facts = memory.recall(user_id) if user_id else {}
+    return {"user_id": user_id, "facts": facts}
+
 
 def route_node(state: AgentState) -> dict:
     """路由节点：原来的 agent.run() 第一步。路由 token 记在本地账上。"""
@@ -108,6 +135,8 @@ def route_node(state: AgentState) -> dict:
     force = state.get("force_route")
     if force in ("easy", "hard"):
         route = Route(force, f"强制{force}", route.by)
+
+    messages, ctx_stats = _build_messages({**state, "query": query}, query)
 
     return {
         "query": query,
@@ -120,7 +149,8 @@ def route_node(state: AgentState) -> dict:
             "tokens_in": route.tokens_in,
             "tokens_out": route.tokens_out,
         },
-        "messages": _build_messages({**state, "query": query}),
+        "messages": messages,
+        "ctx_stats": ctx_stats,
         "local_in": route.tokens_in,
         "local_out": route.tokens_out,
         "cloud_in": 0,
@@ -197,13 +227,55 @@ def escalate_node(state: AgentState) -> dict:
     return update
 
 
+def _summarize(old_msgs: list[dict]) -> tuple[str, int, int]:
+    """把老对话压缩成摘要。返回 (摘要, tin, tout)。
+
+    优先本地小模型；不可用（含 MOCK）时退化为"逐条截取前 30 字"的机械摘要——
+    效果差一些，但保证链路不阻塞，且成本为 0。
+    """
+    if not old_msgs:
+        return "", 0, 0
+    transcript = "\n".join(
+        f"{m.get('role', 'user')}: {m.get('content', '')}" for m in old_msgs)
+    try:
+        text, tin, tout = call_local(
+            [{"role": "user", "content": SUMMARIZE_PROMPT + transcript[:3000]}],
+            max_tokens=160,
+        )
+        return text.strip()[:context.SUMMARY_MAX_CHARS], tin, tout
+    except ProviderError:
+        parts = [f"{m.get('role','user')}:{m.get('content','')[:30]}"
+                 for m in old_msgs[-8:]]
+        return ("；".join(parts))[:SUMMARY_MAX_CHARS], 0, 0
+
+
 def bookkeep_node(state: AgentState) -> dict:
-    """记账节点：成本计算 + 落库 + 把本轮对话追加进 history。"""
+    """记账节点：成本计算 + 历史摘要压缩 + 落库 + 更新 history。"""
     route = state["route"]
     local_in = state.get("local_in", 0)
     local_out = state.get("local_out", 0)
     cloud_in = state.get("cloud_in", 0)
     cloud_out = state.get("cloud_out", 0)
+    summary_in = summary_out = 0
+
+    # ---- 先追加 history，再决定是否要压缩（摘要在落库前做，成本才能进账）----
+    history = list(state.get("history") or [])
+    history.append({"role": "user", "content": state["query"]})
+    history.append({"role": "assistant", "content": state.get("answer", "")})
+
+    summary = state.get("summary") or ""
+    summarized = False
+    if len(history) > MAX_HISTORY_MESSAGES:
+        old, keep = history[:-SUMMARY_KEEP_MESSAGES], history[-SUMMARY_KEEP_MESSAGES:]
+        piece, tin, tout = _summarize(old)
+        summary_in, summary_out = tin, tout
+        local_in += tin
+        local_out += tout
+        # 新旧摘要合并：旧的浓缩成一句话前缀，避免摘要无限膨胀
+        summary = (summary[:120] + "\n" if summary else "") + piece
+        history = keep
+        summarized = True
+
     tokens_in = local_in + cloud_in
     tokens_out = local_out + cloud_out
     latency_ms = int((time.perf_counter() - state["started"]) * 1000)
@@ -232,10 +304,7 @@ def bookkeep_node(state: AgentState) -> dict:
         escalated=state.get("escalated", False),
     )
 
-    history = list(state.get("history") or [])
-    history.append({"role": "user", "content": state["query"]})
-    history.append({"role": "assistant", "content": state.get("answer", "")})
-
+    facts = state.get("facts") or {}
     result = {
         "answer": state.get("answer", ""),
         "route": route["difficulty"],
@@ -249,8 +318,32 @@ def bookkeep_node(state: AgentState) -> dict:
         "baseline_cost_cny": round(baseline, 6),
         "escalated": state.get("escalated", False),
         "degraded": state.get("degraded", False),
+        # 上下文工程的可观测性：注入了哪些记忆、裁了多少历史
+        "memory": {
+            "enabled": bool(state.get("user_id")),
+            "facts_injected": list(facts.keys()),
+            "summary_used": bool(state.get("summary")),
+            "summarized_now": summarized,
+            "ctx_tokens": state.get("ctx_stats") or {},
+        },
     }
-    return {"history": history[-MAX_HISTORY_MESSAGES:], "result": result}
+    return {"history": history, "summary": summary, "result": result}
+
+
+def save_memory_node(state: AgentState) -> dict:
+    """长期记忆写入：从本轮提问抽取事实落库。
+
+    只抽 query 不抽 answer：模型回复里可能出现"用户说他是学生"这类转述，
+    直接抽会把转述错当陈述。宁可少记，不可记错。
+    """
+    user_id = state.get("user_id") or ""
+    saved = memory.remember(user_id, state["query"]) if user_id else {}
+    if saved:
+        result = dict(state.get("result") or {})
+        if "memory" in result:
+            result["memory"]["facts_saved"] = list(saved.keys())
+            return {"result": result}
+    return {}
 
 
 # ---------------- 条件边 ----------------
@@ -271,14 +364,17 @@ def after_check(state: AgentState) -> str:
 
 def build_graph(checkpointer=None):
     g = StateGraph(AgentState)
+    g.add_node("load_memory", load_memory_node)
     g.add_node("route", route_node)
     g.add_node("local_answer", local_answer_node)
     g.add_node("cloud_answer", cloud_answer_node)
     g.add_node("self_check", self_check_node)
     g.add_node("escalate", escalate_node)
     g.add_node("bookkeep", bookkeep_node)
+    g.add_node("save_memory", save_memory_node)
 
-    g.add_edge(START, "route")
+    g.add_edge(START, "load_memory")
+    g.add_edge("load_memory", "route")
     g.add_conditional_edges("route", after_route, {
         "easy": "local_answer", "hard": "cloud_answer",
     })
@@ -290,7 +386,8 @@ def build_graph(checkpointer=None):
     })
     g.add_edge("escalate", "bookkeep")
     g.add_edge("cloud_answer", "bookkeep")
-    g.add_edge("bookkeep", END)
+    g.add_edge("bookkeep", "save_memory")
+    g.add_edge("save_memory", END)
     return g.compile(checkpointer=checkpointer)
 
 
@@ -316,15 +413,24 @@ def get_app():
 
 
 def run_graph(query: str, session_id: str = "default",
-              force_route: str | None = None) -> dict:
-    """对外入口：与 agent.run() 返回字段完全一致（多轮时需带 session_id）。"""
+              force_route: str | None = None,
+              user_id: str = "") -> dict:
+    """对外入口：与 agent.run() 返回字段完全一致。
+
+    session_id  → 短期记忆（本段对话的上下文，checkpointer 持久化）
+    user_id     → 长期记忆（跨会话的用户事实，SQLite user_facts 表）
+    两个键独立：新会话不会忘掉用户，新身份不会读到别人的会话。
+    """
     query = (query or "").strip()
     if not query:
         return {"error": "empty query"}
 
     app = get_app()
     config = {"configurable": {"thread_id": session_id}}
-    out = app.invoke({"query": query, "force_route": force_route}, config)
+    out = app.invoke(
+        {"query": query, "force_route": force_route, "user_id": user_id},
+        config,
+    )
     return out["result"]
 
 

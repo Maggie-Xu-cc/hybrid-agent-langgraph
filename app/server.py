@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import store
+from . import memory, store
 from .agent import run
 from .config import settings
 
@@ -31,12 +31,14 @@ WEB = Path(__file__).resolve().parent.parent / "web" / "index.html"
 class ChatIn(BaseModel):
     query: str
     force_route: str | None = None
-    session_id: str = "default"  # 多轮对话用：同 session_id 共享记忆
+    session_id: str = "default"  # 短期记忆：同 session_id 共享对话上下文
+    user_id: str = ""            # 长期记忆：跨会话记住用户事实；空 = 不启用
 
 
 @app.on_event("startup")
 def _startup() -> None:
     store.init()
+    memory.init()
 
 
 @app.get("/")
@@ -48,7 +50,7 @@ def index() -> FileResponse:
 def api_chat(body: ChatIn) -> dict:
     if USE_GRAPH:
         result = run_graph(body.query, session_id=body.session_id,
-                           force_route=body.force_route)
+                           force_route=body.force_route, user_id=body.user_id)
         engine = "langgraph"
     else:
         result = run(body.query, force_route=body.force_route)
@@ -94,6 +96,18 @@ def api_delete_all_sessions() -> dict:
     if not USE_GRAPH or delete_all_sessions is None:
         return {"deleted": 0, "note": "删除会话需要 LangGraph 链路"}
     return {"deleted": delete_all_sessions()}
+
+
+@app.delete("/api/memory/{user_id}")
+def api_forget_user(user_id: str) -> dict:
+    """清空某用户的长期记忆（短期会话不受影响）。"""
+    return {"deleted": memory.forget(user_id), "user_id": user_id}
+
+
+@app.get("/api/memory/{user_id}")
+def api_get_memory(user_id: str) -> dict:
+    """查看某用户已被记住的事实（调试/演示用）。"""
+    return {"user_id": user_id, "facts": memory.recall(user_id)}
 
 
 @app.post("/api/clear")
