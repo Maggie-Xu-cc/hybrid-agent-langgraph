@@ -743,7 +743,10 @@ async function switchSession(sid) {
 function startNewSession() {
   sessionId = newSid();
   localStorage.setItem(SID_KEY, sessionId);
-  if (!mySids.includes(sessionId)) mySids.unshift(sessionId);
+  // 连点"新对话"会攒出一串没说过话的空壳：只保留"服务端真有记录"的和当前这个。
+  // 判据用 serverSessions（checkpointer 里有没有这个 thread），不用时间戳猜。
+  const kept = mySids.filter((s) => s === sessionId || serverSessions.has(s));
+  mySids = [sessionId, ...kept.filter((s) => s !== sessionId)];
   localStorage.setItem(SIDS_KEY, JSON.stringify(mySids));
   currentItems = [];
   paint([]);
