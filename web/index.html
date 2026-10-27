@@ -146,6 +146,10 @@
     <div class="stat"><div class="k">累计成本</div><div class="v" id="s-cost">¥0</div></div>
     <div class="stat"><div class="k">较全云端节省</div><div class="v" id="s-save">0%</div></div>
     <div class="stat"><div class="k">平均延迟</div><div class="v" id="s-lat">0ms</div></div>
+    <div class="stat"><div class="k">缓存命中</div><div class="v" id="s-cache">0</div></div>
+    <div class="stat"><div class="k">缓存命中率</div><div class="v" id="s-cache-ratio">0%</div></div>
+    <div class="stat"><div class="k">缓存省下</div><div class="v" id="s-cache-cost">¥0</div></div>
+    <div class="stat"><div class="k">缓存条目</div><div class="v" id="s-cache-entries">0</div></div>
   </div>
 
   <div class="card" style="margin-top:14px">
@@ -300,18 +304,24 @@ document.querySelectorAll('[data-q]').forEach((b) => {
 
 async function refresh() {
   const r = await fetch('/api/stats');
-  const { summary: s, recent } = await r.json();
+  const { summary: s, recent, cache } = await r.json();
   $('s-runs').textContent = s.runs;
   $('s-cost').textContent = '¥' + fmt(s.cost_cny, 4);
   $('s-save').textContent = (s.saved_ratio * 100).toFixed(1) + '%';
   $('s-lat').textContent = s.avg_latency_ms + 'ms';
+  if (cache) {
+    $('s-cache').textContent = s.cache_hits ?? 0;
+    $('s-cache-ratio').textContent = ((s.cache_hit_ratio || 0) * 100).toFixed(1) + '%';
+    $('s-cache-cost').textContent = '¥' + fmt(cache.cost_saved_cny, 6);
+    $('s-cache-entries').textContent = cache.entries;
+  }
   $('recent').innerHTML = recent.map((x) => `
     <tr>
       <td>${x.ts.slice(11)}</td>
       <td>${x.query.slice(0, 26)}</td>
-      <td>${x.route}</td>
+      <td>${x.decided_by === 'cache' ? '⚡缓存' : x.route}</td>
       <td>${x.latency_ms}ms</td>
-      <td>¥${fmt(x.cost_cny, 6)}</td>
+      <td>${x.decided_by === 'cache' ? '0（命中）' : '¥' + fmt(x.cost_cny, 6)}</td>
     </tr>`).join('');
 }
 

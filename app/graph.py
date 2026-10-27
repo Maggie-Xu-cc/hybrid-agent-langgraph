@@ -22,10 +22,14 @@
 
 图的结构（阶段二后）：
 
-    START ─▶ load_memory ─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
-                                 │                                │                         │
-                                 └──hard──▶ cloud_answer          └─通过─▶ bookkeep ─▶ save_memory ─▶ END
-                                            (cloud_answer ─────────────────▶ bookkeep)
+    START ─▶ load_memory ─▶ cache_lookup ─命中─▶ bookkeep ─▶ save_memory ─▶ END
+                                 │
+                                 └未命中─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
+                                              │                                │                         │
+                                              └──hard──▶ cloud_answer          └─通过─▶ bookkeep ◀───────┘
+                                                         (cloud_answer ─────────────────▶ bookkeep)
+
+语义缓存（阶段三）在路由之前：相似问题直接复用答案，成本降为 0。
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from . import context, memory, store
+from . import cache, context, memory, store
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
 from .router import Route, decide
@@ -93,6 +97,9 @@ class AgentState(TypedDict, total=False):
     escalated: bool
     degraded: bool
     needs_escalation: bool
+    cache_hit: bool  # 语义缓存是否命中（cache_lookup 节点判定）
+    cache_score: float  # 命中时的相似度
+    use_cache: bool  # 本轮是否启用缓存（评测时关掉，避免污染对照实验）
     started: float
     result: dict
 
@@ -124,6 +131,43 @@ def load_memory_node(state: AgentState) -> dict:
     user_id = state.get("user_id") or ""
     facts = memory.recall(user_id) if user_id else {}
     return {"user_id": user_id, "facts": facts}
+
+
+def cache_lookup_node(state: AgentState) -> dict:
+    """语义缓存查找：路由之前拦一道，命中则整个推理链路都不用跑。
+
+    命中时直接构造 answer/route 等字段，条件边把流程引向 bookkeep——
+    bookkeep 仍走原路径构造 result，保证缓存命中的返回结构与普通请求完全一致。
+    查找成本 ≈ 一次 256 维向量线性扫描，毫秒级，0 token。
+    """
+    if not state.get("use_cache", settings.enable_cache):
+        return {"cache_hit": False}
+    hit = cache.lookup(state["query"])
+    if not hit:
+        return {"cache_hit": False}
+    return {
+        "cache_hit": True,
+        "cache_score": hit["score"],
+        "started": time.perf_counter(),  # 命中路径不经过 route，这里补上计时起点
+        "answer": hit["answer"],
+        "model_used": f"{hit['model']} (cache)",
+        "route": {
+            "difficulty": hit["difficulty"],
+            "reason": f"语义缓存命中(相似度{hit['score']:.2f})",
+            "by": "cache",
+            "latency_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+        },
+        "messages": [],
+        "ctx_stats": {},
+        "local_in": 0,
+        "local_out": 0,
+        "cloud_in": 0,
+        "cloud_out": 0,
+        "escalated": False,
+        "degraded": False,
+    }
 
 
 def route_node(state: AgentState) -> dict:
@@ -258,8 +302,21 @@ def bookkeep_node(state: AgentState) -> dict:
     cloud_out = state.get("cloud_out", 0)
     summary_in = summary_out = 0
 
+    # ---- 语义缓存写入：把这份答案存起来，下次相似问题就能 0 成本复用 ----
+    # 只存"首轮独立问题"：多轮问题依赖会话上下文，换会话直接复用会答错。
+    # hard 默认不存（质量敏感+重复率低），CACHE_CACHE_HARD=1 可打开。
+    pre_history = state.get("history") or []
+    cache_writable = (
+        state.get("use_cache", settings.enable_cache)
+        and not state.get("cache_hit")
+        and not pre_history
+        and not state.get("degraded")
+        and bool(state.get("answer"))
+        and (route["difficulty"] == "easy" or settings.cache_cache_hard)
+    )
+
     # ---- 先追加 history，再决定是否要压缩（摘要在落库前做，成本才能进账）----
-    history = list(state.get("history") or [])
+    history = list(pre_history)
     history.append({"role": "user", "content": state["query"]})
     history.append({"role": "assistant", "content": state.get("answer", "")})
 
@@ -304,6 +361,17 @@ def bookkeep_node(state: AgentState) -> dict:
         escalated=state.get("escalated", False),
     )
 
+    if cache_writable:
+        cache.put(
+            query=state["query"],
+            answer=state["answer"],
+            model=state.get("model_used", ""),
+            difficulty=route["difficulty"],
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost=cost,
+        )
+
     facts = state.get("facts") or {}
     result = {
         "answer": state.get("answer", ""),
@@ -318,6 +386,8 @@ def bookkeep_node(state: AgentState) -> dict:
         "baseline_cost_cny": round(baseline, 6),
         "escalated": state.get("escalated", False),
         "degraded": state.get("degraded", False),
+        "cache_hit": bool(state.get("cache_hit")),
+        "cache_score": round(state.get("cache_score") or 0, 3),
         # 上下文工程的可观测性：注入了哪些记忆、裁了多少历史
         "memory": {
             "enabled": bool(state.get("user_id")),
@@ -348,6 +418,10 @@ def save_memory_node(state: AgentState) -> dict:
 
 # ---------------- 条件边 ----------------
 
+def after_cache(state: AgentState) -> str:
+    return "hit" if state.get("cache_hit") else "miss"
+
+
 def after_route(state: AgentState) -> str:
     return state["route"]["difficulty"]
 
@@ -365,6 +439,7 @@ def after_check(state: AgentState) -> str:
 def build_graph(checkpointer=None):
     g = StateGraph(AgentState)
     g.add_node("load_memory", load_memory_node)
+    g.add_node("cache_lookup", cache_lookup_node)
     g.add_node("route", route_node)
     g.add_node("local_answer", local_answer_node)
     g.add_node("cloud_answer", cloud_answer_node)
@@ -374,7 +449,10 @@ def build_graph(checkpointer=None):
     g.add_node("save_memory", save_memory_node)
 
     g.add_edge(START, "load_memory")
-    g.add_edge("load_memory", "route")
+    g.add_edge("load_memory", "cache_lookup")
+    g.add_conditional_edges("cache_lookup", after_cache, {
+        "hit": "bookkeep", "miss": "route",
+    })
     g.add_conditional_edges("route", after_route, {
         "easy": "local_answer", "hard": "cloud_answer",
     })
@@ -414,12 +492,15 @@ def get_app():
 
 def run_graph(query: str, session_id: str = "default",
               force_route: str | None = None,
-              user_id: str = "") -> dict:
+              user_id: str = "",
+              use_cache: bool | None = None) -> dict:
     """对外入口：与 agent.run() 返回字段完全一致。
 
     session_id  → 短期记忆（本段对话的上下文，checkpointer 持久化）
     user_id     → 长期记忆（跨会话的用户事实，SQLite user_facts 表）
-    两个键独立：新会话不会忘掉用户，新身份不会读到别人的会话。
+    use_cache   → 语义缓存开关；None = 跟随全局配置。评测时显式传 False，
+                  否则同义用例第二次出现会命中缓存，污染对照实验。
+    两个记忆键独立：新会话不会忘掉用户，新身份不会读到别人的会话。
     """
     query = (query or "").strip()
     if not query:
@@ -428,7 +509,8 @@ def run_graph(query: str, session_id: str = "default",
     app = get_app()
     config = {"configurable": {"thread_id": session_id}}
     out = app.invoke(
-        {"query": query, "force_route": force_route, "user_id": user_id},
+        {"query": query, "force_route": force_route, "user_id": user_id,
+         "use_cache": settings.enable_cache if use_cache is None else use_cache},
         config,
     )
     return out["result"]

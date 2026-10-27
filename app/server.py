@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import memory, store
+from . import cache, memory, store
 from .agent import run
 from .config import settings
 
@@ -39,6 +39,9 @@ class ChatIn(BaseModel):
 def _startup() -> None:
     store.init()
     memory.init()
+    if settings.enable_cache:
+        cache.init()
+        cache.purge_expired()   # 启动时清一次过期条目，之后命中时也会顺带跳过
 
 
 @app.get("/")
@@ -62,7 +65,23 @@ def api_chat(body: ChatIn) -> dict:
 
 @app.get("/api/stats")
 def api_stats() -> dict:
-    return {"summary": store.stats(), "recent": store.recent(8)}
+    return {"summary": store.stats(), "recent": store.recent(8),
+            "cache": cache.stats() if settings.enable_cache else None}
+
+
+@app.get("/api/cache")
+def api_cache_stats() -> dict:
+    """语义缓存概况：条目数、累计命中、省下的 token 和成本。"""
+    return {"enabled": settings.enable_cache,
+            "threshold": settings.cache_threshold,
+            "ttl_days": settings.cache_ttl_days,
+            **cache.stats()}
+
+
+@app.delete("/api/cache")
+def api_cache_clear() -> dict:
+    """清空语义缓存（不影响记账和会话记忆）。"""
+    return {"deleted": cache.clear(), "summary": cache.stats()}
 
 
 @app.get("/api/sessions")

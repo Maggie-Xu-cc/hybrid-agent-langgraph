@@ -46,8 +46,10 @@ def make_runner(engine: str):
         def _run(query: str, force: str | None) -> dict:
             # 评测是单轮任务：每条用例用独立 thread_id，
             # 避免上一条用例的对话历史污染下一条（否则成本/答案都不可比）。
+            # use_cache=False：评测要测的是路由/模型链路本身，缓存命中会把
+            # 同义用例的成本拉成 0，让对照实验失去意义。
             return run_graph(query, session_id=f"eval-{uuid.uuid4().hex}",
-                             force_route=force)
+                             force_route=force, use_cache=False)
 
         return _run
 

@@ -91,11 +91,25 @@ def stats() -> dict:
                 "SELECT route, COUNT(*) n FROM runs GROUP BY route"
             ).fetchall()
         }
+        # 分层追踪（tracing）：每个环节接了多少请求、平均延迟、花了多少钱。
+        # decided_by 即请求走过的"最后一层"：cache=缓存命中, rule/model/default=路由结果
+        by_layer_raw = conn.execute(
+            "SELECT decided_by layer, COUNT(*) n, COALESCE(AVG(latency_ms),0) lat,"
+            " COALESCE(SUM(cost_cny),0) cost FROM runs GROUP BY decided_by"
+        ).fetchall()
 
     total = row["n"] or 0
     cost = row["cost"] or 0.0
     base = row["base"] or 0.0
     saved = (1 - cost / base) if base > 0 else 0.0
+    by_layer = {
+        r["layer"] or "unknown": {
+            "count": r["n"],
+            "avg_latency_ms": int(r["lat"] or 0),
+            "cost_cny": round(r["cost"] or 0, 6),
+        }
+        for r in by_layer_raw
+    }
     return {
         "runs": total,
         "cost_cny": round(cost, 4),
@@ -105,6 +119,10 @@ def stats() -> dict:
         "escalated": int(row["esc"] or 0),
         "easy": by_route.get("easy", 0),
         "hard": by_route.get("hard", 0),
+        "by_layer": by_layer,
+        "cache_hits": by_layer.get("cache", {}).get("count", 0),
+        "cache_hit_ratio": round(by_layer.get("cache", {}).get("count", 0) / total, 4)
+        if total else 0.0,
     }
 
 # 给演示页面底部“最近 10 条调用记录”

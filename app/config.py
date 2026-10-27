@@ -36,6 +36,13 @@ class Settings:
     router_max_tokens: int = int(os.getenv("ROUTER_MAX_TOKENS", "48"))
     mock_mode: bool = os.getenv("MOCK_MODE", "0") == "1"
 
+    # 语义缓存（app/cache.py）：相似问题直接复用答案，成本降为 0
+    # threshold=0.45 是实测校准值：同义改写对 n-gram 余弦通常 ≥0.5，无关问题 ≤0.3
+    enable_cache: bool = os.getenv("ENABLE_CACHE", "1") == "1"
+    cache_threshold: float = float(os.getenv("CACHE_THRESHOLD", "0.45"))
+    cache_ttl_days: int = int(os.getenv("CACHE_TTL_DAYS", "7"))
+    cache_cache_hard: bool = os.getenv("CACHE_CACHE_HARD", "0") == "1"
+
     # 1 = 走 LangGraph 编排（app/graph.py）；0 = 走原来的显式流程（app/agent.py）
     # graph.py 导入失败（未装 langgraph）时 server.py 会自动回退
     enable_langgraph: bool = os.getenv("ENABLE_LANGGRAPH", "1") == "1"

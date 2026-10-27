@@ -5,7 +5,7 @@
 > 主流程用 LangGraph `StateGraph` 编排，带会话记忆与可切换的双链路（图编排 / 显式流程）对照评测。
 > 核心不是"又一个聊天机器人"，而是回答一个问题：**在什么条件下，自建小模型 + 云端兜底比全部走 API 更划算？**
 >
-> 三级降本思路：规则层拦下大部分请求（0 成本）→ 本地小模型承接简单请求（低）→ 云端大模型只处理真正难的（高）。
+> 三级降本思路：**语义缓存命中（0 成本）→ 规则层拦下大部分请求（0 成本）→ 本地小模型承接简单请求（低）→ 云端大模型只处理真正难的（高）**。
 
 ## 架构
 
@@ -75,6 +75,40 @@ system 人设（必留）＋ 长期记忆事实（≤200 tok）＋ 早前摘要�
 - `GET /api/memory/{user_id}` → 查看已记住的事实
 - `DELETE /api/memory/{user_id}` → 清空某身份的长期记忆
 - 冒烟测试（离线，26 项断言）：`python tools/smoke_memory.py`
+
+### 语义缓存（v1.3）
+
+`app/cache.py` 插在路由**之前**：相似的问题直接复用上次的答案，成本降为 0。降本链路完整变成四级：
+
+```
+语义缓存命中(¥0) ─▶ 规则路由(¥0) ─▶ 本地小模型(低) ─▶ 云端大模型(高)
+```
+
+实现要点（每条都是面试可展开的取舍）：
+
+- **查询向量化零成本**：字符 n-gram hashing 到 256 维归一化向量（`embed()` 纯 Python，毫秒级）。为缓存再调一次 embedding API 就本末倒置——`embed()` 是独立函数，将来换 BGE 等真 embedding 模型只改这一个函数
+- **阈值实测校准**：同义改写对 n-gram 余弦通常 ≥0.5、无关问题 ≤0.3，默认阈值取 0.45（`CACHE_THRESHOLD`）。短句寒暄召回弱是已知边界（好在寒暄本来就走 0 成本规则路由）
+- **只缓存首轮独立问题**：多轮问题（"继续""为什么"）依赖会话上下文，换会话直接复用会答错——宁可少命中，不可答错。hard 请求默认不缓存（质量敏感+重复率低），`CACHE_CACHE_HARD=1` 可打开
+- **两段式查找**：归一化 hash 精确匹配 O(1) 优先，再相似度线性扫描（条目量级小，毫秒级）；等量级上万再上向量库
+- **TTL 过期**（默认 7 天）+ 命中刷新：过期答案可能已过时（"今天天气"），一律不返回
+
+评测时显式关缓存（`run_graph(..., use_cache=False)`），否则同义用例第二次出现命中缓存，污染对照实验。
+
+- `GET /api/cache` → 缓存概况（条目/命中/省下的 token 与成本）
+- `DELETE /api/cache` → 清空缓存
+- 冒烟测试（离线，36 项断言）：`python tools/smoke_cache.py`
+- 基准（两遍原始问题 + 一遍改写问法）：`python tools/cache_bench.py`（加 `--mock` 离线跑）
+
+### 分层追踪（v1.3）
+
+每次请求落在哪一层、各层延迟与成本，记账表按 `decided_by` 归因，`/api/stats` 直接给出：
+
+```
+| 层     | 请求数 | 平均延迟 | 成本(¥) |
+| cache  | 22     | 0ms      | 0.0000  |
+| model  | 17     | ...      | ...     |
+| rule   | 33     | ...      | ...     |
+```
 
 前端每个浏览器会话自动生成 `session_id`（存 `localStorage`，刷新不丢），页面上的「新会话」按钮换 id 即隔离上下文；后端不传时默认 `default`。
 
@@ -198,10 +232,11 @@ app/
   clients.py   OpenAI 兼容客户端（本地/云端）+ 离线 mock
   router.py    三层难度路由
   agent.py     基线主流程（显式三步，ENABLE_LANGGRAPH=0 时使用）
-  graph.py     LangGraph 编排主流程（默认）：条件边 + 自检升级 + 记账 + 会话记忆
+  graph.py     LangGraph 编排主流程（默认）：缓存查找 + 条件边 + 自检升级 + 记账 + 会话记忆
+  cache.py     语义缓存：n-gram 向量相似度匹配（插在路由之前）
   context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/摘要/历史）
   memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
-  store.py     SQLite 记录与统计
+  store.py     SQLite 记录与统计（含分层追踪 by_layer）
   server.py    FastAPI 服务（按开关选择链路，返回 engine 字段）
 web/index.html 演示页面（自动生成并复用 session_id 与 user_id，「新会话」/「忘掉我」）
 eval/
@@ -210,8 +245,10 @@ eval/
 tools/
   capacity_plan.py   算力需求测算（三阶段预算）
   bench_throughput.py 并发压测（测单卡 tok/s）
+  cache_bench.py      语义缓存基准（命中率/成本对比，--mock 可离线）
   smoke_langgraph.py  LangGraph 链路冒烟测试（离线）
   smoke_memory.py     记忆与上下文冒烟测试（离线，26 项断言）
+  smoke_cache.py      语义缓存冒烟测试（离线，36 项断言）
 deploy/
   start_vllm.sh  环境判定 + 下权重 + 起 vLLM（换独立显卡后的备用脚本）
   run_all.py     一键采集：压测 + 评测 + 算力重算 + 归档

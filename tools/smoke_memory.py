@@ -107,7 +107,8 @@ check("新会话召回到事实", "name" in mem2.get("facts_injected", [])
 check("召回计数可观测", mem2.get("ctx_tokens", {}).get("memory", 0) > 0,
       f"注入 {mem2.get('ctx_tokens', {}).get('memory')} tok")
 
-r3 = run_graph("我在做什么项目？", session_id="smoke-anon-" + uuid.uuid4().hex[:6])
+r3 = run_graph("我在做什么项目？", session_id="smoke-anon-" + uuid.uuid4().hex[:6],
+               use_cache=False)   # 这条验证的是记忆注入，与缓存无关，关掉避免干扰
 check("无 user_id 时不注入（与基线一致）",
       r3["memory"]["facts_injected"] == [] and r3["memory"]["ctx_tokens"]["memory"] == 0)
 
