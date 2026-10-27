@@ -1,0 +1,22 @@
+# AUP（AMD 云 GPU / Jupyter 环境）专用依赖：在 requirements.txt 之上追加
+#
+# 为什么单独一个文件：
+#   本地 Windows 不需要 torch（走云端就够），AUP 上必须有 torch 才能跑 GPU 推理。
+#   装进 requirements.txt 会让本机也去下 2GB 的 torch，完全没必要。
+#
+# ⚠️ 不要在这里写 torch：
+#   AUP 镜像自带的是 ROCm 版 torch（装好就能用 GPU）。
+#   如果你手动 pip install torch，很可能被换成 CPU 版，显卡就白给了。
+#   装之前先确认：python -c "import torch; print(torch.__version__, torch.version.hip)"
+#   hip 一栏不是 None 才是 ROCm 版。
+#
+# 用法：
+#   pip install -r requirements-aup.txt
+
+-r requirements.txt
+
+# local_server.py / aup_gpu_demo.py 都靠它加载模型
+transformers>=4.40
+
+# 不是硬性依赖（不用 device_map 就不需要），但装上能少踩一类坑
+accelerate>=0.28

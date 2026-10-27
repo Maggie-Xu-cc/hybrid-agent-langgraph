@@ -226,6 +226,10 @@ DISABLE_LOCAL=1 python tools/cache_bench.py --easy-only --workers 4
 
 ## 云端实验：三条命令
 
+> 在 **AUP**（AMD 云 GPU）上跑，先看 [docs/aup-quickstart.md](docs/aup-quickstart.md)——照抄版，
+> 写清了每步应该看到什么、20 分钟会话怎么拆开、权重怎么放持久分区、报错对照表。
+> 那上面第一件事是 `bash deploy/aup_setup.sh`（自检 GPU / 依赖 / 权重 / .env）。
+
 ```bash
 python deploy/local_server.py  # 起 OpenAI 兼容本地服务（transformers，平台无 vLLM）
 cp .env.example .env           # 改 LOCAL_MODEL / CLOUD_API_KEY / MOCK_MODE=0
@@ -366,8 +370,11 @@ deploy/
   local_server.py    本地模型服务（transformers + 标准库 HTTP，无 vLLM 的机器用）
   start_vllm.sh      环境判定 + 下权重 + 起 vLLM（有 GPU 且能装 vLLM 时用）
   run_all.py         一键采集：压测 + 评测 + 缓存基准 + 算力重算 + 归档（--cloud-only 无本地模型时）
+  aup_setup.sh       AUP 环境自检 + 装依赖 + 预下权重（--install / --predownload）
   prepare_bundle.py  生成部署包（白名单拷贝，避免把 venv 和本地数据库传上云）
+requirements-aup.txt   AUP 专用追加依赖（transformers；torch 用镜像自带的 ROCm 版）
 docs/evidence/   实验结果与原始日志（RESULTS.md 为自动生成的汇总）
+docs/aup-quickstart.md   AUP 照抄版上手指南（每步应该看到什么 / 会话怎么拆）
 docs/deploy.md   AMD ROCm 部署手册
 docs/data-dictionary.md  记账表字段说明与成本归因
 docs/code-reading.md     代码精读（面试复习用）

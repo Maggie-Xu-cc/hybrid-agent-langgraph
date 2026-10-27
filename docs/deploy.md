@@ -117,6 +117,10 @@ python tools/capacity_plan.py --gpu-tps <n>
 
 ## 6. 一条命令跑通（推荐）
 
+> 📌 **在 AUP 上跑，直接看 [aup-quickstart.md](aup-quickstart.md)** —— 那份是照抄版，
+> 写清了每步应该看到什么、20 分钟会话怎么拆、权重怎么放持久分区。
+> 本节是通用流程，AUP 之外的环境看这里。
+
 ```bash
 # 1) 起本地服务：按卡选一种
 python deploy/local_server.py     # AUP / 装不上 vLLM：transformers + 标准库 HTTP，默认 8000
