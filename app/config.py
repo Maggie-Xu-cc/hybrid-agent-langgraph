@@ -134,6 +134,29 @@ class Settings:
         want = [x.strip() for x in self.tool_confirm_levels.split(",") if x.strip()]
         return tuple(x for x in want if x in allow)
 
+    # ---------------- 多智能体审查（app/critic.py）----------------
+    enable_critic: bool = os.getenv("ENABLE_CRITIC", "0") == "1"
+    # 审哪些轮次：tools=只在动过手的轮次审（推荐）/ all=全审 / off=不审
+    # 默认 tools 的理由：没有证据的普通问答，"审查"只能靠模型自己打自己，效果差还费钱；
+    # 动过手的轮次有证据可比，审查才有依据，而且这类轮次的风险最高（会去写数据）。
+    critic_when: str = os.getenv("CRITIC_WHEN", "tools")
+    # 最多返工几次。1 次是性价比拐点：第二次返工基本只在措辞上打转
+    critic_max_rounds: int = int(os.getenv("CRITIC_MAX_ROUNDS", "1"))
+    # 低于这个分数就返工（同时要求审查员自己判 pass）
+    critic_min_score: int = int(os.getenv("CRITIC_MIN_SCORE", "70"))
+
+    def should_review(self, used_tools: bool, cache_hit: bool) -> bool:
+        """这一轮要不要叫审查员。
+
+        缓存命中的答案**不审**：它的成本是 0，那是这条路线的全部卖点；
+        为了"审一下"去花一次模型调用，等于把缓存省下的钱当场花回去。
+        """
+        if not self.enable_critic or cache_hit:
+            return False
+        if self.critic_when == "all":
+            return True
+        return bool(used_tools) if self.critic_when == "tools" else False
+
     # ---------------- MCP（app/mcp/）----------------
     # 格式：name=命令 参数;name2=命令 参数
     # 例：notes=python -m mcp_servers.notes

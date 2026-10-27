@@ -60,6 +60,10 @@ PUBLIC_ENV = {
     "MCP_SERVERS": "notes=python -m mcp_servers.notes",
     # 演示前先灌几条示例便签：一进来就能查到东西，不用等别人先写
     "NOTES_SEED": "1",
+    # 多智能体审查：只在"动过手"的轮次审。这类轮次有证据可比、风险也最高
+    # （会去写数据），是审查最能出成绩的地方；普通问答审了纯加钱。
+    "ENABLE_CRITIC": "1",
+    "CRITIC_WHEN": "tools",
 }
 
 # 这些是本地开发产物，不能带上云

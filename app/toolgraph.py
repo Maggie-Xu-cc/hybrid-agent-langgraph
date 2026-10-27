@@ -263,6 +263,7 @@ def build_tool_graph(model_fn: react.ModelFn | None = None,
             progressed = True
             steps.append(react.Step(step, c["name"], c["args"], out.ok, out.summary,
                                     out.ms, truncated=out.truncated, error=out.error,
+                                    out=(out.content or out.summary),
                                     confirm="approved" if c.get("level") in confirm_levels
                                     else "auto").brief())
             convo.append({"role": "tool", "tool_call_id": c["id"],

@@ -92,16 +92,24 @@ class Step:
     # 这一步是"自己跑的"还是"人点头才跑的"：auto / approved / rejected。
     # 页面和记账都要它——"它想写但你不让"和"它写了"，是两条完全不同的轨迹。
     confirm: str = "auto"
+    # 工具真实输出的一小段。summary 是给人看的摘要（"3 行输出"），
+    # 里面没有数字和结论——审查员拿它当证据，就会把对的数字判成编的。
+    out: str = ""
 
     def brief(self) -> dict:
         """给页面/记账用的紧凑结构。参数可能是一大段代码，超过 240 字只留开头。"""
         args = json.dumps(self.args, ensure_ascii=False)
         if len(args) > 240:
             args = args[:240] + "…"
+        # 输出超长时留头留尾：只留头会把结论（通常在最末）切掉，
+        # 只留尾又看不到"查了什么"。700 字够一般结果，也压得住记账表体积。
+        out, cut = self.out or "", False
+        if len(out) > 700:
+            out, cut = out[:500] + "…" + out[-180:], True
         return {"n": self.n, "name": self.name, "args": args, "ok": self.ok,
                 "summary": self.summary, "ms": self.ms, "repeat": self.repeat,
                 "truncated": self.truncated, "error": self.error[:120],
-                "confirm": self.confirm}
+                "confirm": self.confirm, "out": out, "out_cut": cut}
 
 
 @dataclass
@@ -217,7 +225,8 @@ def run(
             repeats_in_a_row = 0
             progressed = True
             res.steps.append(Step(step, c["name"], args, out.ok, out.summary,
-                                  out.ms, truncated=out.truncated, error=out.error))
+                                  out.ms, truncated=out.truncated, error=out.error,
+                                  out=(out.content or out.summary)))
             convo.append({"role": "tool", "tool_call_id": c["id"],
                           "content": out.for_model()})
 

@@ -198,6 +198,26 @@
   }
   .tstep .cf.rej { border-color: var(--guard-line); background: var(--guard-bg); color: var(--guard); }
 
+  /* 多智能体：审查员说的话，要跟工具轨迹分开显示——它是"另一个角色"的意见 */
+  .critbox {
+    margin: 10px 0 2px; border: 1px solid #d9dff0; border-radius: 10px;
+    background: #f6f7fc; overflow: hidden;
+  }
+  .critbox > summary {
+    display: flex; gap: 8px; align-items: center; cursor: pointer;
+    padding: 6px 10px; background: #eceffa; font-size: 12px; color: #4a5b96;
+    list-style: none; user-select: none;
+  }
+  .critbox > summary::-webkit-details-marker { display: none; }
+  .critbox > summary .why { margin-left: auto; color: #86837a; font-weight: 400; }
+  .critbox .cissue {
+    padding: 5px 10px; font-size: 12px; border-top: 1px solid #e4e8f5;
+    color: #3d4463; display: flex; gap: 6px;
+  }
+  .critbox .cissue .dot { color: #8b93b8; }
+  .critbox.bad > summary { background: var(--guard-bg); color: var(--guard); border-color: var(--guard-line); }
+  .critbox.bad { border-color: var(--guard-line); background: #fdf6f4; }
+
   /* 人在环路：动手之前拦一道，问一句 */
   .askbox {
     margin: 10px 0 2px; padding: 12px; border-radius: 12px;
@@ -544,6 +564,11 @@ function metaLine(meta) {
   if (cf && cf.asked) parts.push(`你确认 <b>${cf.asked}</b> 次`);
   const waited = Number((meta.tools && meta.tools.waited_ms) || 0);
   if (waited > 500) parts.push(`其中等你 <b>${(waited / 1000).toFixed(1)}s</b>`);
+  // 审查：把"多花的钱买到了什么"直接写在成本旁边，不用点开也看得见
+  const cr = meta.critic;
+  if (cr && cr.rounds) {
+    parts.push(`审查 <b>${cr.score} 分</b>${cr.fixes ? ` · 返工 <b>${cr.fixes}</b> 次` : ''}`);
+  }
   return `<div class="meta">${parts.join('<span style="color:#ddd9d0">·</span>')}</div>`;
 }
 
@@ -591,6 +616,29 @@ function toolBox(tools) {
         <span class="why">${tools.reason ? '因为' + esc(tools.reason) : ''}</span>
       </summary>
       ${rows}
+    </details>`;
+}
+
+// 审查员的话。为什么不并进工具框：它是**另一个角色**的判断，不是"这一步做了什么"。
+// 合并显示会让"谁说的"消失——而多智能体演示的全部看点就是"有第二个人在挑错"。
+function criticBox(c) {
+  if (!c || c.skipped || !c.rounds) return '';
+  const issues = c.issues || [];
+  const bad = !c.pass;
+  const head = bad
+    ? `审查员 · <b>${c.score} 分</b> · 提了 ${issues.length} 个问题`
+    : `审查员 · <b>${c.score} 分</b> · 通过`;
+  const rounds = `${c.rounds} 轮${c.fixes ? ' · 返工 ' + c.fixes + ' 次' : ''}`;
+  return `
+    <details class="critbox ${bad ? 'bad' : ''}" ${bad ? 'open' : ''}>
+      <summary>
+        <span>${head}</span>
+        <span>${esc(rounds)}</span>
+        <span class="why">${c.by === 'rule' ? '数字核对直接判的（零成本）'
+          : c.by === 'error' ? '审查员自己出错，已放行' : ''}</span>
+      </summary>
+      ${issues.map((x) => `<div class="cissue"><span class="dot">·</span>${esc(x)}</div>`).join('')
+        || `<div class="cissue"><span class="dot">·</span>没有发现问题</div>`}
     </details>`;
 }
 
@@ -660,6 +708,17 @@ function buildStream(messages, turns) {
             stop: '',
             reason: '',
           },
+          // 刷新页面后审查痕迹也要在：记账表里存的是分号串，这里还原成数组。
+          // skipped 用 rounds===0 反推——旧数据没有这一列，缺省当成"没审"最安全。
+          critic: {
+            rounds: t.critic_rounds || 0,
+            pass: !!t.critic_pass,
+            score: t.critic_score || 0,
+            fixes: t.critic_fixes || 0,
+            issues: String(t.critic_issues || '').split('；').filter(Boolean),
+            skipped: !(t.critic_rounds > 0),
+            by: '',
+          },
         };
       }
     }
@@ -688,6 +747,7 @@ function nodeHtml(item) {
     <div class="msg ai"><div class="card">
       <div class="ai-head">${item.ask ? '<span class="badge hard">等你确认</span>' : badgeHtml(m)}</div>
       ${toolBox(m && m.tools)}
+      ${criticBox(m && m.critic)}
       ${item.content ? `<div class="answer">${mdInline(item.content)}</div>` : ''}
       ${guardBox(m)}
       ${metaLine(m)}
@@ -798,6 +858,7 @@ function applyResult(d, query, items) {
     guard_matched: d.cache_guard ? d.cache_guard.matched : '',
     hit_score: (d.cache_hit ? d.cache_score : (d.cache_guard ? d.cache_guard.score : null)),
     tools: d.tools || null,
+    critic: d.critic || null,
   };
 
   // 检索来源：答案不是编的唯一证据，所以要让出处可见
@@ -1095,6 +1156,21 @@ function renderDrawer(d) {
       window.__tools && window.__tools.confirm_enabled
         ? '开 · ' + ((window.__tools.confirm_levels || []).join('/') || '—') + ' 级工具动手前要你点头'
         : '关 · 工具一口气跑完（ENABLE_TOOL_GRAPH=0 的基线模式）'}</div>
+
+    <div class="sec-t">多智能体审查</div>
+    <div class="grid2">
+      ${kv('审查员', (window.__tools && window.__tools.critic && window.__tools.critic.enabled) ? '开启' : '关闭',
+           (window.__tools && window.__tools.critic && window.__tools.critic.enabled)
+             ? '审 ' + (window.__tools.critic.when === 'all' ? '全部轮次' : '动过手的轮次') : 'ENABLE_CRITIC=1 打开')}
+      ${kv('最多返工', ((window.__tools && window.__tools.critic && window.__tools.critic.max_rounds) || 0) + ' 次')}
+      ${kv('及格线', ((window.__tools && window.__tools.critic && window.__tools.critic.min_score) || 0) + ' 分')}
+      ${kv('审过的轮次', (s.critic_reviewed || 0) + ' 轮')}
+      ${kv('被打回', (s.critic_failed || 0) + ' 轮')}
+      ${kv('真改了', (s.critic_fixed || 0) + ' 轮')}
+    </div>
+    <div class="note">审查分两层：先做数字核对（零成本，答案里的数字必须能在证据里找到），
+      再由模型审"有没有依据、有没有答非所问"。没过审查的答案不写缓存——
+      否则这个错误会被复制到后面所有相似问题上。</div>
 
     <div class="sec-t">语义缓存</div>
     <div class="grid2">

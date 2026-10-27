@@ -45,7 +45,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from . import cache, context, memory, rag, react, store
+from . import cache, context, critic, memory, rag, react, store
 from .toolgraph import build_tool_graph
 from .dbutil import with_retry
 from .clients import ProviderError, call_cloud, call_local
@@ -119,6 +119,15 @@ class AgentState(TypedDict, total=False):
     tool_calls: int  # 实际执行了几次工具（不含重复调用）
     tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error/cancelled
     tool_waited_ms: int  # 等用户点"同意"的时间：要从延迟里扣掉，那不是系统慢
+    # ---- 多智能体审查（app/critic.py）----
+    critic_rounds: int  # 审了几轮（含返工后再审）
+    critic_pass: bool  # 最后一轮是否通过
+    critic_score: int  # 审查员给的分数（0-100）
+    critic_issues: list  # 审查员提的问题（打回的依据）
+    critic_hint: str  # 修改方向
+    critic_fixes: int  # 返工了几次
+    critic_by: str  # 谁判的：rule（数字核对）/llm/error（审查员自己挂了，放行）/skip
+    critic_skipped: bool  # 这一轮没审（开关关着，或缓存命中）
     started: float
     result: dict
 
@@ -437,6 +446,100 @@ def _confirm_stats(steps: list) -> dict:
     }
 
 
+def _evidence_of(state: AgentState) -> tuple[str, bool]:
+    """把这一轮"手上有的证据"摊成文本，交给审查员比对。
+
+    证据只有三种来源：检索到的资料、工具的实际返回、长期记忆里的事实。
+    返回 (文本, 是否被截断)——工具结果超长会被截成头尾，这个事实必须往上传：
+    否则审查员会把"被截掉的数字"判成"编的数字"（实测误伤过一次）。
+    """
+    parts: list[str] = []
+    truncated = False
+    for c in state.get("rag_chunks") or []:
+        parts.append(f"[资料 {c.get('doc', '')} § {c.get('heading', '')}] {c.get('text', '')}")
+    for s in state.get("tool_steps") or []:
+        name = str(s.get("name") or "")
+        if name.startswith("("):          # 收口步骤不是证据
+            continue
+        # 优先用真实输出：summary 只是"3 行输出"这类摘要，拿它当证据等于没证据
+        body = s.get("out") or s.get("summary", "")
+        is_cut = bool(s.get("truncated") or s.get("out_cut"))
+        cut = "（此结果被截断，只保留头尾）" if is_cut else ""
+        truncated = truncated or is_cut
+        parts.append(f"[工具 {name} 参数 {s.get('args', '')}]{cut} {body}")
+    facts = state.get("facts") or {}
+    if facts:
+        parts.append("[记忆] " + "；".join(f"{k}={v}" for k, v in facts.items()))
+    return "\n".join(parts), truncated
+
+
+def review_node(state: AgentState) -> dict:
+    """审查员：判断这一轮的答案能不能放行，不能就打回返工。
+
+    为什么单独一个节点：它是"第二个人"，要有自己的输入输出、自己能停能走，
+    才能在图上被看见（页面上能指着说"这一步是审查员，它发现了两条问题"）。
+    藏在一个函数内部，就只是一次额外的模型调用，讲不出"多智能体"。
+    """
+    rounds = int(state.get("critic_rounds") or 0)
+    used_tools = bool(state.get("tool_steps"))
+    if not settings.should_review(used_tools, bool(state.get("cache_hit"))):
+        # 关着开关、或缓存命中：原样放行。节点照样留在图里，
+        # 这样"审/不审"只差一个配置，而不是两张图——图一换，前面所有埋点都要重测。
+        return {"critic_skipped": True, "critic_pass": True, "critic_by": "skip"}
+
+    evidence, cut = _evidence_of(state)
+    rev = critic.review(state.get("query") or "", state.get("answer") or "",
+                        evidence, min_score=settings.critic_min_score, truncated=cut)
+    return {
+        "critic_rounds": rounds + 1,
+        "critic_pass": rev.passed,
+        "critic_score": rev.score,
+        "critic_issues": rev.issues,
+        "critic_hint": rev.hint,
+        "critic_by": rev.by,
+        "critic_skipped": False,
+        # 审查本身也花钱：token 记进云端账，总成本才是真的。
+        # 把审查成本藏起来，A/B 对比就成了"白送一轮质检"，结论会偏。
+        "cloud_in": state.get("cloud_in", 0) + rev.tin,
+        "cloud_out": state.get("cloud_out", 0) + rev.tout,
+    }
+
+
+def after_review(state: AgentState) -> str:
+    if state.get("critic_skipped") or state.get("critic_pass"):
+        return "bookkeep"
+    # 返工次数用完就收工：每打回一次都是真金白银，而且第二轮基本只在措辞上打转
+    if int(state.get("critic_fixes") or 0) >= settings.critic_max_rounds:
+        return "bookkeep"
+    return "revise"
+
+
+def revise_node(state: AgentState) -> dict:
+    """返工：带着审查意见和证据重写答案。
+
+    失败了不抛错，保留原答案——审查意见已经记在 state 里，页面照样能看到
+    "它被打了回票但没改成功"。这比整轮失败好：用户至少拿到了原来那份答案。
+    """
+    rev = critic.Review(passed=False, score=int(state.get("critic_score") or 0),
+                        issues=list(state.get("critic_issues") or []),
+                        hint=state.get("critic_hint") or "")
+    msgs = critic.build_revise_messages(state.get("query") or "",
+                                        state.get("answer") or "", rev,
+                                        _evidence_of(state)[0])
+    fixes = int(state.get("critic_fixes") or 0) + 1
+    try:
+        answer, tin, tout = call_cloud(msgs)
+    except ProviderError:
+        return {"critic_fixes": fixes}
+    return {
+        "answer": answer,
+        "model_used": f"{state.get('model_used', '')} -> 返工",
+        "cloud_in": state.get("cloud_in", 0) + tin,
+        "cloud_out": state.get("cloud_out", 0) + tout,
+        "critic_fixes": fixes,
+    }
+
+
 def bookkeep_node(state: AgentState) -> dict:
     """记账节点：成本计算 + 历史摘要压缩 + 落库 + 更新 history。"""
     route = state["route"]
@@ -468,6 +571,10 @@ def bookkeep_node(state: AgentState) -> dict:
         # （数据库有几行、网页写了什么），这些变化没有版本号可比。
         # kb_version 能管"文档改过"，管不了"数据库多了一条记录"。
         and not state.get("tool_steps")
+        # 没过审查的答案不写缓存：缓存是"这份答案值得复用"的承诺，
+        # 审查员刚说它有问题，还存起来就是把这个错误复制到后面所有相似问题上。
+        # 注意"审了但没改成功"（有 issues、critic_pass=False）也不能存。
+        and (state.get("critic_skipped") or state.get("critic_pass"))
         and (route["difficulty"] == "easy" or settings.cache_cache_hard)
     )
 
@@ -534,6 +641,13 @@ def bookkeep_node(state: AgentState) -> dict:
         escalated=state.get("escalated", False),
         # 工具轨迹落库：页面刷新后要能重放"这一轮调了什么、结果是什么"
         tool_steps=state.get("tool_steps") or [],
+        # 审查记录落库：不打进库就只剩"这一轮花了多少钱"，
+        # 没法回答"多花的钱买到了什么"——而这正是要不要留审查员的唯一依据。
+        critic_rounds=int(state.get("critic_rounds") or 0),
+        critic_pass=bool(state.get("critic_pass", True)),
+        critic_score=int(state.get("critic_score") or 0),
+        critic_fixes=int(state.get("critic_fixes") or 0),
+        critic_issues="；".join(state.get("critic_issues") or [])[:400],
     )
 
     if cache_writable:
@@ -593,6 +707,18 @@ def bookkeep_node(state: AgentState) -> dict:
             # 页面要能说清"这一步是人放的，不是它自作主张"。
             "confirm": _confirm_stats(state.get("tool_steps") or []),
             "waited_ms": waited_ms,
+        },
+        # 多智能体的可观测性：审了几轮、谁判的、发现什么问题、改了几次
+        "critic": {
+            "enabled": settings.enable_critic,
+            "skipped": bool(state.get("critic_skipped", True)),
+            "rounds": int(state.get("critic_rounds") or 0),
+            "pass": bool(state.get("critic_pass", True)),
+            "score": int(state.get("critic_score") or 0),
+            "fixes": int(state.get("critic_fixes") or 0),
+            "issues": list(state.get("critic_issues") or []),
+            "by": state.get("critic_by") or "",
+            "when": settings.critic_when,
         },
         # 检索的可观测性：命了几段、来自哪个文档、最高分多少、耗时
         "rag": {
@@ -667,6 +793,8 @@ def build_graph(checkpointer=None):
     g.add_node("tool_agent", tool_node())
     g.add_node("self_check", self_check_node)
     g.add_node("escalate", escalate_node)
+    g.add_node("review", review_node)
+    g.add_node("revise", revise_node)
     g.add_node("bookkeep", bookkeep_node)
     g.add_node("save_memory", save_memory_node)
 
@@ -679,17 +807,23 @@ def build_graph(checkpointer=None):
     g.add_conditional_edges("route", after_route, {
         "easy": "local_answer", "hard": "cloud_answer", "tools": "tool_agent",
     })
-    # 工具链路直接进 bookkeep：不走 self_check（那是给"没把握"用的重答机制，
-    # 会把工具查到的实事丢掉），也不进缓存（见 bookkeep 里的注释）
-    g.add_edge("tool_agent", "bookkeep")
+    # 所有"出答案"的口子统一收进 review：审查员是最后一道闸，
+    # 它可能直接放行（`critic_skipped`/通过），也可能打回 revise 重写一轮。
+    # 缓存命中不经过它——见 settings.should_review 里的理由（审一下就白省了）。
+    g.add_edge("tool_agent", "review")
     g.add_conditional_edges("local_answer", after_local, {
-        "check": "self_check", "done": "bookkeep",
+        "check": "self_check", "done": "review",
     })
     g.add_conditional_edges("self_check", after_check, {
-        "escalate": "escalate", "done": "bookkeep",
+        "escalate": "escalate", "done": "review",
     })
-    g.add_edge("escalate", "bookkeep")
-    g.add_edge("cloud_answer", "bookkeep")
+    g.add_edge("escalate", "review")
+    g.add_edge("cloud_answer", "review")
+    g.add_conditional_edges("review", after_review, {
+        "bookkeep": "bookkeep", "revise": "revise",
+    })
+    # 返工完再审一次：不能因为"改过了"就默认它改对了
+    g.add_edge("revise", "review")
     g.add_edge("bookkeep", "save_memory")
     g.add_edge("save_memory", END)
     return g.compile(checkpointer=checkpointer)

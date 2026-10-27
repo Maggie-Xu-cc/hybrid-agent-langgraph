@@ -238,6 +238,12 @@ def api_tools() -> dict:
             "confirm_enabled": bool(settings.tool_graph and settings.enable_tools),
             "confirm_levels": list(settings.confirm_levels()),
             "tools": toolreg.describe(settings.allowed_levels()),
+            # 多智能体审查：开没开、审哪些轮次、最多返工几次。
+            # 页面要能说清"这次多花的钱买了什么"，所以这几项得能看见。
+            "critic": {"enabled": settings.enable_critic,
+                       "when": settings.critic_when,
+                       "max_rounds": settings.critic_max_rounds,
+                       "min_score": settings.critic_min_score},
             # 外部（MCP）工具：连了谁、各自有几个工具、协议版本
             "mcp": mcp_bridge.status()}
 

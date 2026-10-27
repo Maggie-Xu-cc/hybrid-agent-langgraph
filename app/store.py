@@ -25,7 +25,14 @@ CREATE TABLE IF NOT EXISTS runs (
     session_id TEXT DEFAULT '',              -- 哪个会话产生的：页面按会话分开显示
     guard_blocked TEXT DEFAULT '',           -- 门卫拒绝原因（空 = 没被拦）
     cache_score REAL DEFAULT 0,              -- 本轮最高缓存相似度（含被拦下的候选）
-    tool_steps TEXT DEFAULT ''               -- 工具调用轨迹（JSON 数组，空 = 没动手）
+    tool_steps TEXT DEFAULT '',              -- 工具调用轨迹（JSON 数组，空 = 没动手）
+    -- 多智能体审查的账：审了几轮、最后过没过、几分、改了几次、提了什么问题。
+    -- 打不进库就只剩"这一轮花了多少钱"，没法回答"多花的钱买到了什么"。
+    critic_rounds INTEGER DEFAULT 0,         -- 审了几轮（0 = 没审）
+    critic_pass INTEGER DEFAULT 1,           -- 最后一轮是否通过（0 = 提了问题还是放行了）
+    critic_score INTEGER DEFAULT 0,          -- 审查员给的分数
+    critic_fixes INTEGER DEFAULT 0,          -- 返工次数
+    critic_issues TEXT DEFAULT ''            -- 提的问题（；分隔，截断 400 字）
 );
 """
 
@@ -35,6 +42,11 @@ _MIGRATIONS = (
     ("guard_blocked", "TEXT DEFAULT ''"),
     ("cache_score", "REAL DEFAULT 0"),
     ("tool_steps", "TEXT DEFAULT ''"),
+    ("critic_rounds", "INTEGER DEFAULT 0"),
+    ("critic_pass", "INTEGER DEFAULT 1"),
+    ("critic_score", "INTEGER DEFAULT 0"),
+    ("critic_fixes", "INTEGER DEFAULT 0"),
+    ("critic_issues", "TEXT DEFAULT ''"),
 )
 
 
@@ -77,13 +89,19 @@ def record(
     guard_blocked: str = "",
     cache_score: float = 0.0,
     tool_steps: list | None = None,
+    critic_rounds: int = 0,
+    critic_pass: bool = True,
+    critic_score: int = 0,
+    critic_fixes: int = 0,
+    critic_issues: str = "",
 ) -> None:
     with _conn() as conn:
         conn.execute(
             "INSERT INTO runs (ts, query, route, reason, decided_by, model, latency_ms,"
             " tokens_in, tokens_out, cost_cny, baseline_cost_cny, escalated,"
-            " session_id, guard_blocked, cache_score, tool_steps)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " session_id, guard_blocked, cache_score, tool_steps,"
+            " critic_rounds, critic_pass, critic_score, critic_fixes, critic_issues)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
                 query[:500],
@@ -101,6 +119,11 @@ def record(
                 guard_blocked,
                 round(cache_score or 0, 4),
                 json.dumps(tool_steps, ensure_ascii=False) if tool_steps else "",
+                critic_rounds,
+                1 if critic_pass else 0,
+                critic_score,
+                critic_fixes,
+                (critic_issues or "")[:400],
             ),
         )
 
@@ -139,6 +162,15 @@ def stats() -> dict:
             " AND tool_steps != '' THEN tool_steps ELSE '[]' END)),0) steps"
             " FROM runs"
         ).fetchone()
+        # 审查的账：审了多少轮、有几轮被打回、有几轮真改了。
+        # "打回但没改"（critic_pass=0 且 fixes=0）要单独能看出来——
+        # 那说明审查员在报问题，而返工没起作用，这种状态最容易被数字掩盖。
+        critic_row = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN critic_rounds > 0 THEN 1 ELSE 0 END),0) reviewed,"
+            " COALESCE(SUM(CASE WHEN critic_rounds > 0 AND critic_pass = 0 THEN 1 ELSE 0 END),0) failed,"
+            " COALESCE(SUM(CASE WHEN critic_fixes > 0 THEN 1 ELSE 0 END),0) fixed"
+            " FROM runs"
+        ).fetchone()
         by_layer_raw = conn.execute(
             "SELECT decided_by layer, COUNT(*) n, COALESCE(AVG(latency_ms),0) lat,"
             " COALESCE(SUM(cost_cny),0) cost FROM runs GROUP BY decided_by"
@@ -172,6 +204,9 @@ def stats() -> dict:
         "guard_blocks": int(row["guarded"] or 0),
         "tool_runs": int(tool_row["uses"] or 0),
         "tool_steps_total": int(tool_row["steps"] or 0),
+        "critic_reviewed": int(critic_row["reviewed"] or 0),
+        "critic_failed": int(critic_row["failed"] or 0),
+        "critic_fixed": int(critic_row["fixed"] or 0),
     }
 
 # 给演示页面底部“最近 10 条调用记录”
@@ -180,7 +215,8 @@ def recent(limit: int = 10, session_id: str | None = None) -> list[dict]:
     全局混在一起既看不懂，也会让人以为别人的对话是自己的。"""
     sql = ("SELECT ts, query, route, decided_by, latency_ms, cost_cny,"
            " baseline_cost_cny, escalated, session_id, guard_blocked, cache_score,"
-           " tool_steps FROM runs")
+           " tool_steps, critic_rounds, critic_pass, critic_score, critic_fixes,"
+           " critic_issues FROM runs")
     args: list = []
     if session_id is not None:
         sql += " WHERE session_id = ?"
