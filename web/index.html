@@ -191,6 +191,42 @@
   .tstep .st { color: #0f6e56; white-space: nowrap; font-size: 11.5px; }
   .tstep.fail .st { color: var(--guard); }
   .tstep.rep .st { color: #9b978d; }
+  /* 这一步是人点头才跑的 / 被人拒掉的：轨迹上必须一眼能分出来 */
+  .tstep .cf {
+    font-size: 10.5px; padding: 0 5px; border-radius: 999px; white-space: nowrap;
+    border: 1px solid #bfe3d6; background: #e9f7f1; color: #0f6e56;
+  }
+  .tstep .cf.rej { border-color: var(--guard-line); background: var(--guard-bg); color: var(--guard); }
+
+  /* 人在环路：动手之前拦一道，问一句 */
+  .askbox {
+    margin: 10px 0 2px; padding: 12px; border-radius: 12px;
+    background: #fffaef; border: 1px solid #f0dfb8;
+  }
+  .askbox .ah {
+    display: flex; align-items: center; gap: 6px; font-weight: 700;
+    font-size: 13px; color: #7a5310; margin-bottom: 6px;
+  }
+  .askbox .acall {
+    font-size: 12px; background: #fff; border: 1px solid #f0e4c9; border-radius: 8px;
+    padding: 7px 9px; margin-bottom: 6px;
+  }
+  .askbox .acall .nm {
+    font-family: ui-monospace, Consolas, monospace; font-weight: 700; color: #22221f;
+  }
+  .askbox .acall .ar {
+    font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+    color: #86837a; word-break: break-all; margin-top: 2px;
+  }
+  .askbox .why2 { color: #9a7a3a; font-size: 11.5px; }
+  .askbox .acts { display: flex; gap: 8px; margin-top: 8px; }
+  .askbox button {
+    border-radius: 8px; padding: 6px 14px; font-size: 13px; border: 1px solid var(--line);
+    background: #fff; color: var(--text);
+  }
+  .askbox button.ok { background: var(--easy); border-color: var(--easy); color: #fff; }
+  .askbox button.no:hover { border-color: var(--guard-line); color: var(--guard); }
+  .askbox .hint2 { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 
   .detail { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
   .detail summary {
@@ -504,6 +540,10 @@ function metaLine(meta) {
   const sc = Number(meta.hit_score || 0);
   if (sc > 0) parts.push(`相似度 <b>${sc.toFixed(3)}</b>`);
   if (meta.tools && meta.tools.used) parts.push(`工具 <b>${meta.tools.calls || 0} 次</b>`);
+  const cf = meta.tools && meta.tools.confirm;
+  if (cf && cf.asked) parts.push(`你确认 <b>${cf.asked}</b> 次`);
+  const waited = Number((meta.tools && meta.tools.waited_ms) || 0);
+  if (waited > 500) parts.push(`其中等你 <b>${(waited / 1000).toFixed(1)}s</b>`);
   return `<div class="meta">${parts.join('<span style="color:#ddd9d0">·</span>')}</div>`;
 }
 
@@ -514,7 +554,11 @@ const STOP_LABEL = {
   budget: '到预算上限',
   no_progress: '在打转，提前收口',
   error: '链路出错，已降级',
+  cancelled: '你放弃了这一步',
 };
+
+// 这一步谁放的：自己跑的、你点头的、你拒掉的。三种含义完全不同，不能都叫"调用了"。
+const CF_LABEL = { approved: '你同意了', rejected: '你拒绝了' };
 
 // 工具调用轨迹。为什么不合并进 metaLine 一行字：
 // "调了 3 次工具" 这句话本身没有信息量，能证明它会动手的是**每一步的参数和结果**。
@@ -522,24 +566,54 @@ const STOP_LABEL = {
 function toolBox(tools) {
   if (!tools || !tools.used) return '';
   const steps = tools.steps || [];
-  const rows = steps.map((s) => `
+  const rows = steps.map((s) => {
+    const cf = CF_LABEL[s.confirm]
+      ? `<span class="cf ${s.confirm === 'rejected' ? 'rej' : ''}">${CF_LABEL[s.confirm]}</span>` : '';
+    return `
     <div class="tstep ${s.ok ? '' : 'fail'} ${s.repeat ? 'rep' : ''}">
       <span class="n">${esc(String(s.n || ''))}</span>
       <span class="nm">${esc(s.name || '')}</span>
+      ${cf}
       <span class="ar" title="${esc(s.args || '')}">${esc(s.args || '')}</span>
       <span class="st">${s.repeat ? '重复·跳过'
         : (s.ok ? (esc(s.summary || '完成') + (s.ms ? ' · ' + s.ms + 'ms' : ''))
-                : esc(s.error || '失败'))}</span>
-    </div>`).join('');
+                : esc(s.error || s.summary || '失败'))}</span>
+    </div>`;
+  }).join('');
+  const cf = tools.confirm || {};
+  const cfText = cf.asked ? `人确认 ${cf.approved} 批 / ${cf.rejected} 拒` : '';
   return `
     <details class="toolbox" open>
       <summary>
         <b>工具调用 · ${tools.calls || 0} 次</b>
         <span>${esc(STOP_LABEL[tools.stop] || '')}</span>
+        <span>${esc(cfText)}</span>
         <span class="why">${tools.reason ? '因为' + esc(tools.reason) : ''}</span>
       </summary>
       ${rows}
     </details>`;
+}
+
+// 确认卡：动手之前的最后一道闸。这里显示的不是"它将要做的事"的概括，
+// 而是**原样的工具名和参数**——让人凭一眼就能判断该不该批。
+function confirmBox(pending) {
+  const p = pending || {};
+  const calls = (p.calls || []).map((c) => `
+    <div class="acall">
+      <span class="nm">${esc(c.name || '')}</span>
+      <span class="why2"> · ${esc(c.level || '')} 级 · ${esc(c.why || '')}</span>
+      <div class="ar">${esc(JSON.stringify(c.args || {}))}</div>
+    </div>`).join('');
+  return `<div class="askbox">
+    <div class="ah">⚠ 这一步要你点头</div>
+    <div style="font-size:12.5px;color:#7a5310;margin-bottom:8px">${esc(p.question || '')}</div>
+    ${calls}
+    <div class="acts">
+      <button class="ok" onclick="__answerConfirm(true)">同意执行</button>
+      <button class="no" onclick="__answerConfirm(false)">拒绝</button>
+    </div>
+    <div class="hint2">${esc(p.reject_hint || '')}</div>
+  </div>`;
 }
 
 function guardBox(meta) {
@@ -612,9 +686,9 @@ function nodeHtml(item) {
   const m = item.meta;
   return `
     <div class="msg ai"><div class="card">
-      <div class="ai-head">${badgeHtml(m)}</div>
+      <div class="ai-head">${item.ask ? '<span class="badge hard">等你确认</span>' : badgeHtml(m)}</div>
       ${toolBox(m && m.tools)}
-      <div class="answer">${mdInline(item.content)}</div>
+      ${item.content ? `<div class="answer">${mdInline(item.content)}</div>` : ''}
       ${guardBox(m)}
       ${metaLine(m)}
       ${item.extra || ''}
@@ -641,6 +715,17 @@ async function loadCurrent() {
     const d = await r.json();
     currentTurns = d.turns || [];
     currentItems = buildStream(d.messages || [], currentTurns);
+    // 挂起中的确认：刷新页面后卡要能自己回来。不恢复的话，图还在等你点，
+    // 页面上却空了——用户只能开新会话，那一轮的钱就白花了。
+    if (d.pending) {
+      // 这一轮还没跑完，历史里没有它的记录——问题原文要从 pending 里补回来
+      const last = currentItems[currentItems.length - 1];
+      if (d.pending.query && !(last && last.role === 'user' && last.content === d.pending.query)) {
+        currentItems.push({ role: 'user', content: d.pending.query, meta: null });
+      }
+      currentItems.push({ role: 'ai', content: '', meta: null, ask: true,
+                          extra: confirmBox(d.pending) });
+    }
     paint(currentItems);
     updateMetrics(currentTurns);
     const first = (d.messages || []).find((m) => m.role === 'user');
@@ -698,6 +783,62 @@ function turnsRowOf(meta, query) {
   };
 }
 
+// 把一次成功的结果画进对话流。抽成函数是因为有两条路会走到这里：
+// 普通提问（/api/chat 直接给答案）和点了确认之后继续跑（/api/confirm）。
+// 复制一份渲染代码的下场是两边慢慢长歪——一边加了工具卡一边没加。
+function applyResult(d, query, items) {
+  const meta = {
+    decided_by: d.decided_by,
+    model: d.model,
+    layer: d.layer,
+    latency_ms: d.latency_ms,
+    cost_cny: d.cost_cny,
+    baseline_cost_cny: d.baseline_cost_cny,
+    guard_blocked: (d.cache_guard && d.cache_guard.blocked) ? d.cache_guard.reason : '',
+    guard_matched: d.cache_guard ? d.cache_guard.matched : '',
+    hit_score: (d.cache_hit ? d.cache_score : (d.cache_guard ? d.cache_guard.score : null)),
+    tools: d.tools || null,
+  };
+
+  // 检索来源：答案不是编的唯一证据，所以要让出处可见
+  let extra = '';
+  const rg = d.rag || {};
+  if (rg.hit && rg.chunks && rg.chunks.length) {
+    extra = `<details class="detail"><summary>参考了 ${rg.chunks.length} 段资料（检索 ${rg.latency_ms || 0}ms）</summary>
+      <div class="body">${rg.chunks.map((c) => `
+        <div class="rag-item"><span class="src">${esc(c.doc)}${c.heading ? ' § ' + esc(c.heading) : ''}</span>
+        <b> 相关度 ${esc(c.score)}</b></div>`).join('')}</div></details>`;
+  }
+  const mem = d.memory || {};
+  const memBits = [];
+  if (mem.facts_injected && mem.facts_injected.length) memBits.push('注入记忆：' + mem.facts_injected.join('、'));
+  if (mem.facts_saved && mem.facts_saved.length) memBits.push('新记住：' + mem.facts_saved.join('、'));
+  if (mem.summary_used) memBits.push('使用了早前对话的摘要');
+  if (memBits.length) {
+    extra += `<details class="detail"><summary>上下文做了什么</summary>
+      <div class="body">${esc(memBits.join('；'))}</div></details>`;
+  }
+
+  items.push({ role: 'ai', content: d.answer || '（空回答）', meta, extra });
+  currentItems = items;
+  currentTurns = currentTurns.concat([turnsRowOf(meta, query)]);
+  paint(items);
+  updateMetrics(currentTurns);
+  $('sess-title').textContent = (currentItems.find((x) => x.role === 'user') || {}).content.slice(0, 40) || '新对话';
+
+  if (meta.guard_blocked) {
+    setHint('这一轮被门卫拦下了：差点复用一条别的答案，已重新作答');
+  } else if (d.cache_hit) {
+    setHint('命中语义缓存：没有调用模型，这一轮成本为 0');
+  } else {
+    setHint('');
+  }
+  setTimeout(() => { if (!$('hint').textContent.startsWith('请求失败')) setHint(''); }, 4200);
+
+  loadSessions();
+  refreshGlobal();
+}
+
 async function send() {
   const query = $('q').value.trim();
   if (!query || busy) return;
@@ -730,57 +871,20 @@ async function send() {
       return;
     }
 
-    const meta = {
-      decided_by: d.decided_by,
-      model: d.model,
-      layer: d.layer,
-      latency_ms: d.latency_ms,
-      cost_cny: d.cost_cny,
-      baseline_cost_cny: d.baseline_cost_cny,
-      guard_blocked: (d.cache_guard && d.cache_guard.blocked) ? d.cache_guard.reason : '',
-      guard_matched: d.cache_guard ? d.cache_guard.matched : '',
-      hit_score: (d.cache_hit ? d.cache_score : (d.cache_guard ? d.cache_guard.score : null)),
-      tools: d.tools || null,
-    };
-
-    // 检索来源：答案不是编的唯一证据，所以要让出处可见
-    let extra = '';
-    const rg = d.rag || {};
-    if (rg.hit && rg.chunks && rg.chunks.length) {
-      extra = `<details class="detail"><summary>参考了 ${rg.chunks.length} 段资料（检索 ${rg.latency_ms || 0}ms）</summary>
-        <div class="body">${rg.chunks.map((c) => `
-          <div class="rag-item"><span class="src">${esc(c.doc)}${c.heading ? ' § ' + esc(c.heading) : ''}</span>
-          <b> 相关度 ${esc(c.score)}</b></div>`).join('')}</div></details>`;
-    }
-    const mem = d.memory || {};
-    const memBits = [];
-    if (mem.facts_injected && mem.facts_injected.length) memBits.push('注入记忆：' + mem.facts_injected.join('、'));
-    if (mem.facts_saved && mem.facts_saved.length) memBits.push('新记住：' + mem.facts_saved.join('、'));
-    if (mem.summary_used) memBits.push('使用了早前对话的摘要');
-    if (memBits.length) {
-      extra += `<details class="detail"><summary>上下文做了什么</summary>
-        <div class="body">${esc(memBits.join('；'))}</div></details>`;
+    // 它想动手，但这个动作会改数据 → 停下来问人。
+    // 注意这一轮**还没有答案**，也没有记账：真正的答案在点了确认之后才产生。
+    if (d.status === 'awaiting_confirm') {
+      items.pop();
+      items.push({ role: 'ai', content: '', meta: null, ask: true,
+                   extra: confirmBox(d.pending) });
+      currentItems = items;
+      paint(items);
+      setHint('等你点头：这一步会改动数据，批了才执行');
+      return;
     }
 
     items.pop();
-    items.push({ role: 'ai', content: d.answer || '（空回答）', meta, extra });
-    currentItems = items;
-    currentTurns = currentTurns.concat([turnsRowOf(meta, query)]);
-    paint(items);
-    updateMetrics(currentTurns);
-    $('sess-title').textContent = (currentItems.find((x) => x.role === 'user') || {}).content.slice(0, 40) || '新对话';
-
-    if (meta.guard_blocked) {
-      setHint('这一轮被门卫拦下了：差点复用一条别的答案，已重新作答');
-    } else if (d.cache_hit) {
-      setHint('命中语义缓存：没有调用模型，这一轮成本为 0');
-    } else {
-      setHint('');
-    }
-    setTimeout(() => { if (!$('hint').textContent.startsWith('请求失败')) setHint(''); }, 4200);
-
-    loadSessions();
-    refreshGlobal();
+    applyResult(d, query, items);
   } catch (e) {
     items.pop();
     items.push({ role: 'ai', content: '（请求失败）' + e, meta: null });
@@ -793,6 +897,48 @@ async function send() {
     $('q').focus();
   }
 }
+
+// 确认卡上的两个按钮。为什么要单独一个接口：上一轮的运行停在检查点里等人，
+// 点"同意"不是问一个新问题，而是**把那一轮接着跑完**，语义完全不一样。
+window.__answerConfirm = async (approve) => {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('.askbox button').forEach((b) => { b.disabled = true; });
+  setHint(approve ? '已同意，继续执行…' : '已拒绝，让它换个做法…');
+  try {
+    const r = await fetch('/api/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, approve }),
+    });
+    const d = await r.json();
+    if (d.error) {
+      setHint(d.error, true);
+      document.querySelectorAll('.askbox button').forEach((b) => { b.disabled = false; });
+      return;
+    }
+    const items = currentItems.slice();
+    let idx = -1;
+    items.forEach((x, i) => { if (x.ask) idx = i; });
+    const query = idx > 0 ? (items[idx - 1].content || '') : '';
+    if (idx >= 0) items.splice(idx, 1);
+
+    if (d.status === 'awaiting_confirm') {
+      items.push({ role: 'ai', content: '', meta: null, ask: true,
+                   extra: confirmBox(d.pending) });
+      currentItems = items;
+      paint(items);
+      setHint('还有一步要你点头');
+      return;
+    }
+    applyResult(d, query, items);
+  } catch (e) {
+    setHint('确认失败：' + e, true);
+  } finally {
+    busy = false;
+    $('send').disabled = false;
+  }
+};
 
 function paintPending(items) {
   $('empty').classList.add('hidden');
@@ -945,6 +1091,10 @@ function renderDrawer(d) {
         ? window.__tools.mcp.count + ' 个服务 / ' + window.__tools.mcp.tools + ' 个工具（'
           + (window.__tools.mcp.servers || []).map((s) => esc(s.name) + ' ' + (s.connected ? '已连接' : '未连接')).join('，') + '）'
         : '未配置（只用手写工具）'}</div>
+    <div class="note">人在环路：${
+      window.__tools && window.__tools.confirm_enabled
+        ? '开 · ' + ((window.__tools.confirm_levels || []).join('/') || '—') + ' 级工具动手前要你点头'
+        : '关 · 工具一口气跑完（ENABLE_TOOL_GRAPH=0 的基线模式）'}</div>
 
     <div class="sec-t">语义缓存</div>
     <div class="grid2">

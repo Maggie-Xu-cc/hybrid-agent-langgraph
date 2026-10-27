@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import sqlite3
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,9 +19,11 @@ from .config import settings
 # 否则自动回退到 agent.py 的显式流程，两条链路可用 ENABLE_LANGGRAPH 切换对比。
 try:
     from .graph import (delete_all_sessions, delete_session, get_session_messages,
-                        list_sessions, run_graph)
+                        list_sessions, pending_of, resume_graph, run_graph)
 except ImportError:
     run_graph = None
+    resume_graph = None
+    pending_of = None
     list_sessions = None
     get_session_messages = None
     delete_session = None
@@ -37,6 +40,18 @@ class ChatIn(BaseModel):
     force_route: str | None = None
     session_id: str = "default"  # 短期记忆：同 session_id 共享对话上下文
     user_id: str = ""            # 长期记忆：跨会话记住用户事实；空 = 不启用
+
+
+class ConfirmIn(BaseModel):
+    session_id: str
+    approve: bool
+    note: str = ""               # 拒绝时可以写一句原因，会转告给模型
+
+
+# session_id → 弹出确认的时刻。用来算"你犹豫了多久"，记账时从延迟里扣掉。
+# 为什么放内存而不是落库：确认卡本身存在 checkpointer 里（重启也在），
+# 但"什么时候弹的"只影响一条延迟统计，丢了顶多算 0，不值得为它加一张表。
+_asked_at: dict[str, float] = {}
 
 
 @app.on_event("startup")
@@ -73,7 +88,7 @@ async def demo_guard_middleware(request: Request, call_next):
 
     两个开关都为 0 时整段直接跳过——本地开发完全不受影响。
     """
-    if (request.url.path == "/api/chat"
+    if (request.url.path in ("/api/chat", "/api/confirm")
             and (settings.demo_quota_per_day > 0 or settings.demo_rate_per_min > 0)):
         ip = request.client.host if request.client else ""
         forwarded = request.headers.get("x-forwarded-for")
@@ -126,8 +141,47 @@ def api_chat(body: ChatIn) -> dict:
     else:
         result = run(body.query, force_route=body.force_route)
         engine = "plain"
+    if result.get("status") == "awaiting_confirm":
+        # 挂起：这一轮还没有答案，也没有记账（bookkeep 还没跑到）。
+        # 记下弹出时刻，用户点确认时用它算等待时长。
+        _asked_at[body.session_id] = time.time()
+        result["engine"] = engine
+        return result
+    _asked_at.pop(body.session_id, None)
     if "error" not in result:
         result["engine"] = engine
+        result["layer"] = _layer_of(result)
+    return result
+
+
+@app.post("/api/confirm")
+def api_confirm(body: ConfirmIn) -> dict:
+    """确认卡的回执：同意 / 拒绝，然后从中断的地方继续跑。
+
+    为什么是单独的接口而不是复用 /api/chat：原来的请求早就返回了（返回的是
+    "等你确认"），这一轮的状态停在 checkpointer 里。要继续只能带着 resume 语义
+    调一次图——这不是一个新问题，加个 query 字段只会让人误会。
+    """
+    if not USE_GRAPH or resume_graph is None:
+        raise HTTPException(status_code=400,
+                            detail="人工确认需要 LangGraph 链路（ENABLE_LANGGRAPH=1）")
+    asked = _asked_at.pop(body.session_id, None)
+    waited_ms = int((time.time() - asked) * 1000) if asked else 0
+    try:
+        result = resume_graph(body.session_id, approve=body.approve,
+                              note=body.note, waited_ms=waited_ms)
+    except sqlite3.OperationalError as exc:
+        msg = str(exc)
+        if "locked" in msg or "readonly" in msg:
+            raise HTTPException(status_code=503,
+                                detail="会话存储正忙，请再点一次") from exc
+        raise
+    if result.get("status") == "awaiting_confirm":
+        # 一步里有两批写操作时会再问一次，所以这个分支是正常的，不是错误
+        _asked_at[body.session_id] = time.time()
+        return result
+    if "error" not in result:
+        result["engine"] = "langgraph"
         result["layer"] = _layer_of(result)
     return result
 
@@ -180,6 +234,9 @@ def api_tools() -> dict:
             "fetch_domains": [d.strip() for d in settings.tool_fetch_domains.split(",") if d.strip()],
             # 这一轮实际放行的级别：公网只放 read，本机可以开到 danger
             "levels": list(settings.allowed_levels()),
+            # 人在环路：哪些级别动手前要人点头、这个能力开没开
+            "confirm_enabled": bool(settings.tool_graph and settings.enable_tools),
+            "confirm_levels": list(settings.confirm_levels()),
             "tools": toolreg.describe(settings.allowed_levels()),
             # 外部（MCP）工具：连了谁、各自有几个工具、协议版本
             "mcp": mcp_bridge.status()}
@@ -242,10 +299,14 @@ def api_session_detail(session_id: str) -> dict:
     """
     if not USE_GRAPH or get_session_messages is None:
         return {"session_id": session_id, "messages": [], "turns": []}
+    # 挂起中的确认请求也要一起返回：刷新页面后确认卡要能重新出现，
+    # 否则图还在等人点，页面上却什么都没有——用户只能开新会话，那一轮就白跑了。
+    pending = pending_of(session_id) if pending_of else None
     return {"session_id": session_id,
             "messages": get_session_messages(session_id),
             # 记账表按 id 倒序取，再反转成时间正序，和消息顺序一致
-            "turns": list(reversed(store.recent(200, session_id=session_id)))}
+            "turns": list(reversed(store.recent(200, session_id=session_id))),
+            "pending": pending}
 
 
 @app.delete("/api/sessions/{session_id}")

@@ -115,6 +115,25 @@ class Settings:
     # 允许哪些级别的工具跑。留空=按 tool_allow_danger 推；公网部署建议 TOOL_LEVELS=read
     tool_levels: str = os.getenv("TOOL_LEVELS", "")
 
+    # ---------------- 人在环路（app/toolgraph.py）----------------
+    # 1 = 把工具循环拆成 think/act 两个节点的子图，write/danger 级工具执行前弹确认；
+    # 0 = 用原来的纯函数版（react.run），一口气跑完、不暂停。留 0 这条是为了保留基线：
+    #     "上不上人工确认，成本/延迟差多少"本身就是一个能写进报告的对照实验。
+    tool_graph: bool = os.getenv("ENABLE_TOOL_GRAPH", "1") == "1"
+    # 哪些级别需要人先点头（逗号分隔）。read 不该问——查资料也要点确认，没人受得了。
+    tool_confirm_levels: str = os.getenv("TOOL_CONFIRM_LEVELS", "write,danger")
+
+    def confirm_levels(self) -> tuple[str, ...]:
+        """需要人工确认的级别（只保留本轮真的放行的那些）。
+
+        为什么不直接返回配置：配了 write 但 TOOL_LEVELS 里没有 write 时，
+        这些工具根本不会出现在模型眼前，"会不会弹确认"就成了一句空话——
+        提前取交集，页面和日志就不会报一个永远不会发生的动作。
+        """
+        allow = set(self.allowed_levels())
+        want = [x.strip() for x in self.tool_confirm_levels.split(",") if x.strip()]
+        return tuple(x for x in want if x in allow)
+
     # ---------------- MCP（app/mcp/）----------------
     # 格式：name=命令 参数;name2=命令 参数
     # 例：notes=python -m mcp_servers.notes

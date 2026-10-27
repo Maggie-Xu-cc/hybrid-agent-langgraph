@@ -51,6 +51,13 @@ TOOL_SYSTEM = """你可以调用工具来完成任务。规则：
 
 # 模型给的参数偶发不是合法 JSON（多一个逗号、字符串没闭合）。能救就救：
 # 先按 JSON 解，失败再截取第一个 {...} 再解，最后才认输。
+FINALIZE_PROMPT = (
+    "（系统）已达到工具调用上限或预算上限。"
+    "请基于以上已经拿到的结果，直接给出最终答案，不要再调用工具；"
+    "如果信息不足，明确说明还缺什么。"
+)
+
+
 def _parse_args(raw: str) -> tuple[dict | None, str]:
     text = (raw or "").strip() or "{}"
     try:
@@ -80,6 +87,9 @@ class Step:
     repeat: bool = False
     truncated: bool = False
     error: str = ""
+    # 这一步是"自己跑的"还是"人点头才跑的"：auto / approved / rejected。
+    # 页面和记账都要它——"它想写但你不让"和"它写了"，是两条完全不同的轨迹。
+    confirm: str = "auto"
 
     def brief(self) -> dict:
         """给页面/记账用的紧凑结构。参数可能是一大段代码，超过 240 字只留开头。"""
@@ -88,7 +98,8 @@ class Step:
             args = args[:240] + "…"
         return {"n": self.n, "name": self.name, "args": args, "ok": self.ok,
                 "summary": self.summary, "ms": self.ms, "repeat": self.repeat,
-                "truncated": self.truncated, "error": self.error[:120]}
+                "truncated": self.truncated, "error": self.error[:120],
+                "confirm": self.confirm}
 
 
 @dataclass
@@ -115,6 +126,13 @@ def _default_model(messages: list[dict], specs: list[dict]):
 def _cost(tin: int, tout: int) -> float:
     return (tin / 1000 * settings.price_cloud_in_per_1k
             + tout / 1000 * settings.price_cloud_out_per_1k)
+
+
+# 图版（toolgraph.py）也要用这三样。给公开别名而不是让它去 import 下划线函数：
+# 下划线在 Python 里的意思是"这个模块自己的事"，跨模块用就等于借了不打算还的东西。
+default_model = _default_model
+cost_of = _cost
+parse_args = _parse_args
 
 
 def run(
@@ -219,22 +237,30 @@ def run(
     return res
 
 
-def _finalize(convo: list[dict], model_fn: ModelFn, res: ReactResult) -> str:
+def finalize(convo: list[dict], model_fn: ModelFn) -> tuple[str, int, int, str]:
     """步数/预算用尽时的收口：给一次"不许再调工具"的机会，让它把已知信息讲完。
 
     直接返回"步数超限"是最差体验——用户其实已经拿到了大部分信息，
     只是差一句话总结。这一次调用很便宜（工具结果都在上下文里），一定要做。
+
+    返回 (答案, tokens_in, tokens_out, 错误)。单独抽出来是给图版（toolgraph.py）复用：
+    那边没有 ReactResult 这个容器，硬塞一个空壳只为凑参数，两边迟早会走偏。
     """
-    convo.append({"role": "user",
-                  "content": "（系统）已达到工具调用上限或预算上限。"
-                             "请基于以上已经拿到的结果，直接给出最终答案，不要再调用工具；"
-                             "如果信息不足，明确说明还缺什么。"})
+    convo = convo + [{"role": "user", "content": FINALIZE_PROMPT}]
     try:
         content, _calls, tin, tout = model_fn(convo, [])
     except ProviderError as exc:
-        res.steps.append(Step(0, "(收口)", {}, False, "收口失败", 0, error=str(exc)))
+        return "", 0, 0, str(exc)
+    return content or "", tin, tout, ""
+
+
+def _finalize(convo: list[dict], model_fn: ModelFn, res: ReactResult) -> str:
+    """ReactResult 版收口：把这一次调用的 token 记到账上，返回答案。"""
+    answer, tin, tout, err = finalize(convo, model_fn)
+    if err:
+        res.steps.append(Step(0, "(收口)", {}, False, "收口失败", 0, error=err))
         return ""
     res.tokens_in += tin
     res.tokens_out += tout
     res.cost_cny += _cost(tin, tout)
-    return content or ""
+    return answer

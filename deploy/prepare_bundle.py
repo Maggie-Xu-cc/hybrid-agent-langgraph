@@ -49,13 +49,16 @@ BGE_REQ = ["onnxruntime>=1.20", "tokenizers>=0.15"]
 # 一忙起来直接 `python deploy/prepare_bundle.py` 就发上去了——**默认路径必须是安全的**，
 # 要放开得显式加参数。
 PUBLIC_ENV = {
-    # 只放只读工具。danger 级（run_python）等于把 shell 挂在公网页面上：
+    # 只放只读 + 写。danger 级（run_python）等于把 shell 挂在公网页面上：
     # 提示注入一句 print(open('.env').read()) 就能把云端 API Key 读走。
-    "TOOL_LEVELS": "read",
+    "TOOL_LEVELS": "read,write",
     "TOOL_ALLOW_DANGER": "0",
+    # 写操作动手前必须有人点头。这是放开 write 的前提——没有这一条就只能开 read。
+    "ENABLE_TOOL_GRAPH": "1",
+    "TOOL_CONFIRM_LEVELS": "write",
     # 连一个好不相干的外部工具服务，演示"加工具只改配置"
     "MCP_SERVERS": "notes=python -m mcp_servers.notes",
-    # 只读级别下 add 会被闸门拦住，先灌几条示例便签，search/list 才有东西可查
+    # 演示前先灌几条示例便签：一进来就能查到东西，不用等别人先写
     "NOTES_SEED": "1",
 }
 

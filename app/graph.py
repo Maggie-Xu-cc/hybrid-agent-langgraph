@@ -43,8 +43,10 @@ from typing import TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from . import cache, context, memory, rag, react, store
+from .toolgraph import build_tool_graph
 from .dbutil import with_retry
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
@@ -115,7 +117,8 @@ class AgentState(TypedDict, total=False):
     tools_reason: str  # 为什么判定要用工具（页面上要能解释）
     tool_steps: list  # 工具调用轨迹（给页面和记账用）
     tool_calls: int  # 实际执行了几次工具（不含重复调用）
-    tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error
+    tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error/cancelled
+    tool_waited_ms: int  # 等用户点"同意"的时间：要从延迟里扣掉，那不是系统慢
     started: float
     result: dict
 
@@ -420,6 +423,20 @@ def _summarize(old_msgs: list[dict]) -> tuple[str, int, int]:
         return ("；".join(parts))[:SUMMARY_MAX_CHARS], 0, 0
 
 
+def _confirm_stats(steps: list) -> dict:
+    """从轨迹里数出人在环路的账：问了几次、批了几次、拒了几次。
+
+    为什么要单独统计：一趟跑下来"调了 2 次工具"看不出有没有人把关。
+    页面上真正有说服力的是"其中 1 次是你点的同意"，以及"有 1 次被你拒了"。
+    """
+    asked = [s for s in steps if s.get("confirm") in ("approved", "rejected")]
+    return {
+        "asked": len(asked),
+        "approved": sum(1 for s in asked if s.get("confirm") == "approved"),
+        "rejected": sum(1 for s in asked if s.get("confirm") == "rejected"),
+    }
+
+
 def bookkeep_node(state: AgentState) -> dict:
     """记账节点：成本计算 + 历史摘要压缩 + 落库 + 更新 history。"""
     route = state["route"]
@@ -474,7 +491,10 @@ def bookkeep_node(state: AgentState) -> dict:
 
     tokens_in = local_in + cloud_in
     tokens_out = local_out + cloud_out
-    latency_ms = int((time.perf_counter() - state["started"]) * 1000)
+    # 等人点"同意"的那几十秒不是系统慢。不扣掉的话，页面上会出现
+    # "这一轮跑了 42 秒"——而真实原因是用户自己在犹豫，这种数字会误导所有性能结论。
+    waited_ms = int(state.get("tool_waited_ms") or 0)
+    latency_ms = max(0, int((time.perf_counter() - state["started"]) * 1000) - waited_ms)
 
     cost = (
         (local_in + local_out) / 1000 * settings.price_local_per_1k
@@ -569,6 +589,10 @@ def bookkeep_node(state: AgentState) -> dict:
             "calls": state.get("tool_calls") or 0,
             "stop": state.get("tool_stop") or "",
             "steps": state.get("tool_steps") or [],
+            # 人在环路的痕迹：问了几次、批了几次、拒了几次、你犹豫了多久。
+            # 页面要能说清"这一步是人放的，不是它自作主张"。
+            "confirm": _confirm_stats(state.get("tool_steps") or []),
+            "waited_ms": waited_ms,
         },
         # 检索的可观测性：命了几段、来自哪个文档、最高分多少、耗时
         "rag": {
@@ -622,6 +646,16 @@ def after_check(state: AgentState) -> str:
 
 # ---------------- 组装 ----------------
 
+def tool_node():
+    """工具节点：默认走 think/act 子图（写操作要人点头），关掉开关则退回纯函数版。
+
+    为什么两条都留着：这是一个能写进报告的对照实验——同一个问题，
+    有确认 vs 没确认，成本/延迟差多少、被拒绝时回答质量掉多少。
+    只有基线在，这些数字才有意义。
+    """
+    return build_tool_graph() if settings.tool_graph else tool_agent_node
+
+
 def build_graph(checkpointer=None):
     g = StateGraph(AgentState)
     g.add_node("load_memory", load_memory_node)
@@ -630,7 +664,7 @@ def build_graph(checkpointer=None):
     g.add_node("route", route_node)
     g.add_node("local_answer", local_answer_node)
     g.add_node("cloud_answer", cloud_answer_node)
-    g.add_node("tool_agent", tool_agent_node)
+    g.add_node("tool_agent", tool_node())
     g.add_node("self_check", self_check_node)
     g.add_node("escalate", escalate_node)
     g.add_node("bookkeep", bookkeep_node)
@@ -739,13 +773,46 @@ def get_app(db_path: str | None = None):
         return app
 
 
+def _pending_of(app, config: dict) -> dict | None:
+    """这一会话有没有"卡在等人确认"的操作。有就返回确认单，没有返回 None。
+
+    为什么读 get_state 而不是自己维护一张表：中断状态就存在 checkpointer 里，
+    自己再记一份就是两个真相源，重启进程后必然对不上。LangGraph 已经把
+    待处理的 interrupt 挂在 state 上，直接问它就是最准的。
+    """
+    try:
+        st = app.get_state(config)
+    except Exception:          # noqa: BLE001 — 空会话/旧版本可能抛，一律当作"没有待确认"
+        return None
+    ints = getattr(st, "interrupts", None) or ()
+    if not ints:
+        return None
+    first = ints[0]
+    return getattr(first, "value", None) or {"kind": "tool_confirm", "question": "有一步在等你确认"}
+
+
+def _shape(out: dict, session_id: str) -> dict:
+    """把图的输出整成接口返回：要么是答案，要么是"等你确认"。
+
+    两种结果结构不同，前端必须能分辨——把确认单当成答案渲染，用户会看到一段 JSON。
+    """
+    ints = out.get("__interrupt__") or []
+    if ints:
+        first = ints[0]
+        pending = getattr(first, "value", None) or {}
+        return {"status": "awaiting_confirm", "session_id": session_id,
+                "pending": pending}
+    result = out.get("result") or {}
+    return {"status": "ok", **result}
+
+
 def run_graph(query: str, session_id: str = "default",
               force_route: str | None = None,
               user_id: str = "",
               use_cache: bool | None = None,
               use_rag: bool | None = None,
               checkpoint_db: str | None = None) -> dict:
-    """对外入口：与 agent.run() 返回字段完全一致。
+    """对外入口：与 agent.run() 返回字段一致，外加一个 status（ok / awaiting_confirm）。
 
     session_id  → 短期记忆（本段对话的上下文，checkpointer 持久化）
     user_id     → 长期记忆（跨会话的用户事实，SQLite user_facts 表）
@@ -763,6 +830,14 @@ def run_graph(query: str, session_id: str = "default",
 
     app = get_app(checkpoint_db)
     config = {"configurable": {"thread_id": session_id}}
+
+    # 同一会话里还挂着一步没确认，而用户直接问了新问题：
+    # 先把那一步按"取消"收尾（不花钱：act 直接返回，不再调模型），再跑新问题。
+    # 不这么做会有两种坏结果——新问题被挂起的运行挡住，或者用旧的待办答新问题。
+    if _pending_of(app, config):
+        app.invoke(Command(resume={"approve": False, "cancel": True,
+                                   "note": "用户没有确认，直接问了新的问题"}), config)
+
     out = app.invoke(
         {"query": query, "force_route": force_route, "user_id": user_id,
          "session_id": session_id,
@@ -770,7 +845,33 @@ def run_graph(query: str, session_id: str = "default",
          "use_rag": settings.enable_rag if use_rag is None else use_rag},
         config,
     )
-    return out["result"]
+    return _shape(out, session_id)
+
+
+def pending_of(session_id: str, checkpoint_db: str | None = None) -> dict | None:
+    """这个会话有没有卡在等人确认的操作。
+
+    页面刷新之后要用它把确认卡重新画出来——否则用户一刷就卡死在这里：
+    图还在等他点，而页面上什么都没了，他也想不起自己在等什么。
+    """
+    app = get_app(checkpoint_db)
+    return _pending_of(app, {"configurable": {"thread_id": session_id}})
+
+
+def resume_graph(session_id: str, approve: bool, note: str = "",
+                 waited_ms: int = 0, checkpoint_db: str | None = None) -> dict:
+    """用户在确认卡上点了同意/拒绝：从中断处继续跑。
+
+    waited_ms 由调用方（服务端）算好传进来——只有它知道"弹出确认"到"用户点击"
+    之间隔了多久。act 节点把它累加进状态，记账时从延迟里扣掉。
+    """
+    app = get_app(checkpoint_db)
+    config = {"configurable": {"thread_id": session_id}}
+    if not _pending_of(app, config):
+        return {"error": "这个会话没有待确认的操作（可能已经处理过，或者被新问题取消了）"}
+    out = app.invoke(Command(resume={"approve": approve, "note": note,
+                                     "waited_ms": int(waited_ms)}), config)
+    return _shape(out, session_id)
 
 
 # ---------------------------------------------------------------------------
