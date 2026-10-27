@@ -101,6 +101,7 @@ class AgentState(TypedDict, total=False):
     needs_escalation: bool
     cache_hit: bool  # 语义缓存是否命中（cache_lookup 节点判定）
     cache_score: float  # 命中时的相似度
+    cache_cost: float  # 命中条目当初生成时花的钱（用来算"省了多少"）
     use_cache: bool  # 本轮是否启用缓存（评测时关掉，避免污染对照实验）
     rag_chunks: list  # 检索到的相关片段（retrieve 节点，注入 prompt 用）
     rag_hit: bool  # 本轮是否检索到资料
@@ -158,6 +159,7 @@ def cache_lookup_node(state: AgentState) -> dict:
     return {
         "cache_hit": True,
         "cache_score": hit["score"],
+        "cache_cost": hit.get("cost", 0.0),
         "started": time.perf_counter(),  # 命中路径不经过 route，这里补上计时起点
         "answer": hit["answer"],
         "model_used": f"{hit['model']} (cache)",
@@ -398,6 +400,13 @@ def bookkeep_node(state: AgentState) -> dict:
         tokens_in / 1000 * settings.price_cloud_in_per_1k
         + tokens_out / 1000 * settings.price_cloud_out_per_1k
     )
+    # 缓存命中的基线要单独处理：这一轮 0 token、0 成本，按 token 算出来的
+    # baseline 也是 0，于是 (baseline - cost) / baseline 永远是 0/0，
+    # 页面上的"总节省比例"就成了恒定的 0%——省了钱但账上看不出来。
+    # 正确口径是"如果这次没命中缓存、真的调了一次模型要花多少"，
+    # 也就是这条答案当初生成时的成本（存在缓存条目里）。
+    if state.get("cache_hit"):
+        baseline = float(state.get("cache_cost") or 0.0)
 
     store.record(
         query=state["query"],

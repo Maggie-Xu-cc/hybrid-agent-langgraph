@@ -145,7 +145,7 @@ def lookup(query: str, threshold: float | None = None,
         conn = sqlite3.connect(settings.db_path, timeout=10)
         rows = conn.execute(
             "SELECT query_hash, embedding, query_text, answer, model, difficulty,"
-            " hits, updated_at, embed_model, kb_version FROM semantic_cache"
+            " hits, updated_at, embed_model, kb_version, cost_cny FROM semantic_cache"
         ).fetchall()
     except sqlite3.OperationalError:   # 表还没建
         return None
@@ -157,7 +157,7 @@ def lookup(query: str, threshold: float | None = None,
     best_score, best_row, best_hash = 0.0, None, ""
     guarded_out = ""
     for (r_hash, emb_json, query_text, answer, model, difficulty,
-         hits, updated_at, emb_model, kb_ver) in rows:
+         hits, updated_at, emb_model, kb_ver, row_cost) in rows:
         # 换过向量后端：256 维和 512 维算出来的余弦毫无意义，整条跳过。
         # 代价是切换后端后缓存相当于清空——这是正确的，宁可重算不可答错。
         if emb_model != cur_model:
@@ -179,7 +179,8 @@ def lookup(query: str, threshold: float | None = None,
 
         if r_hash == q_hash:
             # 完全一致：字面都一模一样，不需要再过守卫
-            best_score, best_row, best_hash = 1.0, (answer, model, difficulty, hits), r_hash
+            best_score, best_hash = 1.0, r_hash
+            best_row = (answer, model, difficulty, hits, row_cost)
             break
 
         score = _cosine(embed(query), json.loads(emb_json))
@@ -192,12 +193,13 @@ def lookup(query: str, threshold: float | None = None,
             if not ok:
                 guarded_out = why
                 continue
-        best_score, best_row, best_hash = score, (answer, model, difficulty, hits), r_hash
+        best_score, best_hash = score, r_hash
+        best_row = (answer, model, difficulty, hits, row_cost)
 
     if best_row is None or best_score < threshold:
         return None
 
-    answer, model, difficulty, hits = best_row
+    answer, model, difficulty, hits, saved_cost = best_row
     conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         # 注意：刷新的是"被匹配条目"的计数，不是当前查询的 hash——
@@ -208,7 +210,10 @@ def lookup(query: str, threshold: float | None = None,
         )
     conn.close()
     return {"answer": answer, "model": model, "difficulty": difficulty,
-            "score": best_score, "hits": hits + 1, "guard": "pass" if guarded_out else "",
+            "score": best_score, "hits": hits + 1,
+            # 这条答案当初生成的成本：命中时成本记 0，基线要按它算，否则"省了多少"看不出来
+            "cost": float(saved_cost or 0.0),
+            "guard": "pass" if guarded_out else "",
             "guard_blocked": guarded_out}
 
 
