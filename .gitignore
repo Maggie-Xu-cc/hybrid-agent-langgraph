@@ -26,3 +26,6 @@ models/
 .tmpdiag/
 .tmpui/
 .tmpreal/
+.live*.png
+.live_sid
+.tmpdiag/
