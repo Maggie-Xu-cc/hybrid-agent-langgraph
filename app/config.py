@@ -31,6 +31,20 @@ class Settings:
     local_max_tokens: int = int(os.getenv("LOCAL_MAX_TOKENS", "768"))
     cloud_max_tokens: int = int(os.getenv("CLOUD_MAX_TOKENS", "1024"))
 
+    # 超时。openai SDK 不给 timeout 时默认 600 秒——本地端口"通但不响应"
+    # （Ollama 半死、vLLM 加载中等）会让每条请求白等十分钟，这是纯本机跑最坑的地方。
+    local_timeout: float = float(os.getenv("LOCAL_TIMEOUT", "15"))
+    cloud_timeout: float = float(os.getenv("CLOUD_TIMEOUT", "60"))
+    # SDK 默认失败重试 2 次：本地挂了会变成 3 倍等待，本地一律不重试
+    cloud_max_retries: int = int(os.getenv("CLOUD_MAX_RETRIES", "1"))
+
+    # 本地熔断：连续失败 N 次后短路，冷却期内直接跳过本地（0 延迟），
+    # 冷却结束放一次试探请求，成功即恢复。纯云端模式下等于永久短路。
+    local_breaker_threshold: int = int(os.getenv("LOCAL_BREAKER_THRESHOLD", "2"))
+    local_breaker_cooldown: float = float(os.getenv("LOCAL_BREAKER_COOLDOWN", "60"))
+    # 1 = 完全不调本地（纯云端跑基准/演示时最省时间）
+    disable_local: bool = os.getenv("DISABLE_LOCAL", "0") == "1"
+
     enable_router_model: bool = os.getenv("ENABLE_ROUTER_MODEL", "1") == "1"
     enable_escalation: bool = os.getenv("ENABLE_ESCALATION", "1") == "1"
     router_max_tokens: int = int(os.getenv("ROUTER_MAX_TOKENS", "48"))

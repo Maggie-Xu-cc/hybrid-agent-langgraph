@@ -6,6 +6,9 @@
 
 from typing import List, Tuple
 
+import threading
+import time
+
 try:
     from openai import OpenAI
 except ImportError:  # AUP 等环境不一定装了 openai 包；标准库工具链(*_stdlib.py)不经过这里
@@ -16,16 +19,86 @@ from .config import settings
 if OpenAI is None:
     local_client = cloud_client = None
 else:
-    local_client = OpenAI(base_url=settings.local_base_url, api_key=settings.local_api_key)
+    local_client = OpenAI(
+        base_url=settings.local_base_url,
+        api_key=settings.local_api_key,
+        # 不给 timeout 时 SDK 默认 600 秒：本地端口通但不响应（Ollama 半死、
+        # vLLM 还在加载权重）就会每条请求白等十分钟
+        timeout=settings.local_timeout,
+        max_retries=0,   # 本地挂了重试没意义，只会把失败代价放大 3 倍
+    )
     cloud_client = OpenAI(
         base_url=settings.cloud_base_url,
         api_key=settings.cloud_api_key or "EMPTY",
-        timeout=60.0,
+        timeout=settings.cloud_timeout,
+        max_retries=settings.cloud_max_retries,   # SDK 默认 2，偶发 429 才值得重试
     )
 
 
 class ProviderError(RuntimeError):
     pass
+
+
+class LocalBreaker:
+    """本地模型熔断器（三态：闭合 → 打开 → 半开）。
+
+    为什么需要：本地模型不可用时，每条请求仍会白试一次本地（路由一次 + 生成一次）。
+    连接被拒是毫秒级的无所谓，但"端口通、迟迟不回"（半死/OOM/加载中）会让
+    每条请求各白等一个 timeout——10 条请求就是几分钟，看着就像卡死。
+
+    连续失败 threshold 次 → 打开，冷却 cooldown 秒内**不发任何网络请求**，
+    call_local 立刻抛 ProviderError 让上层走降级；
+    冷却到期放一次试探（半开），成功复位、失败继续打开。
+    """
+
+    def __init__(self, threshold: int, cooldown: float) -> None:
+        self.threshold = max(1, threshold)
+        self.cooldown = max(0.0, cooldown)
+        self._fails = 0
+        self._open_until = 0.0
+        self._probing = False
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        """当前是否允许发起本地调用（冷却到期时放一条试探）。"""
+        if settings.disable_local:
+            return False
+        with self._lock:
+            if self._open_until == 0.0:
+                return True
+            if time.monotonic() >= self._open_until:
+                self._probing = True   # 半开：只放行，结果由 ok()/fail() 决定
+                return True
+            return False
+
+    def ok(self) -> None:
+        with self._lock:
+            self._fails = 0
+            self._open_until = 0.0
+            self._probing = False
+
+    def fail(self) -> None:
+        with self._lock:
+            self._fails += 1
+            if self._probing or self._fails >= self.threshold:
+                self._open_until = time.monotonic() + self.cooldown
+                self._fails = 0
+                self._probing = False
+
+    def state(self) -> dict:
+        with self._lock:
+            left = max(0.0, self._open_until - time.monotonic())
+            return {
+                "open": left > 0,
+                "cooldown_left_s": round(left, 1),
+                "fails": self._fails,
+                "disabled": settings.disable_local,
+            }
+
+
+local_breaker = LocalBreaker(
+    settings.local_breaker_threshold, settings.local_breaker_cooldown
+)
 
 
 def _mock_chat(messages: List[dict], model: str, max_tokens: int) -> Tuple[str, int, int]:
@@ -88,12 +161,21 @@ def chat(
 
 
 def call_local(messages: List[dict], max_tokens: int | None = None) -> Tuple[str, int, int]:
-    return chat(
-        local_client,
-        settings.local_model,
-        messages,
-        max_tokens or settings.local_max_tokens,
-    )
+    # 熔断打开时立刻失败：不发网络请求、不等待，上层直接走降级
+    if not local_breaker.allow():
+        raise ProviderError("local circuit open: 上次本地调用失败，冷却期内跳过")
+    try:
+        out = chat(
+            local_client,
+            settings.local_model,
+            messages,
+            max_tokens or settings.local_max_tokens,
+        )
+    except Exception:
+        local_breaker.fail()
+        raise
+    local_breaker.ok()
+    return out
 
 
 def call_cloud(messages: List[dict], max_tokens: int | None = None) -> Tuple[str, int, int]:

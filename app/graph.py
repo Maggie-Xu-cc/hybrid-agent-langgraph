@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from typing import TypedDict
@@ -44,6 +45,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from . import cache, context, memory, store
+from .dbutil import with_retry
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
 from .router import Route, decide
@@ -470,44 +472,104 @@ def build_graph(checkpointer=None):
     return g.compile(checkpointer=checkpointer)
 
 
-def _make_checkpointer():
+# 全局一把可重入锁：既保护建表 DDL，也作为所有 SqliteSaver 实例共用的写锁
+_ckpt_lock = threading.RLock()
+
+# 编译好的图按"检查点库路径"缓存：主库一个，并发基准的每线程库各一个。
+# 用锁保护初始化，避免多个请求同时发现"还没建"而各建一份（那样就又变成多连接了）。
+_apps: dict[str, object] = {}
+_app_lock = threading.Lock()
+
+
+def _with_db_retry(fn, tries: int = 6, delay: float = 0.15):
+    """checkpointer 的读写重试（统一实现见 app/dbutil.py）。
+
+    checkpoint 落盘比业务记录更频繁，这里把重试窗口放大到约 2 秒：
+    Windows 上杀毒软件扫描 -wal 文件会把锁住几百毫秒，重试一两次不够。
+    """
+    return with_retry(fn, tries=tries, delay=delay)
+
+
+# 已经初始化过（建表 + 设 WAL）的库
+_ready_dbs: set[str] = set()
+
+
+def _make_checkpointer(db_path: str | None = None):
     """优先 SQLite 持久化（重启不丢会话），装不上退回内存版。"""
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
 
-        conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
-        return SqliteSaver(conn)
+        path = db_path or CHECKPOINT_DB
+        # timeout 就是 sqlite 的 busy_timeout：并发写时排队等，
+        # 而不是立刻抛 database is locked。
+        conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
+        saver = SqliteSaver(conn)
+        saver.lock = _ckpt_lock
+
+        # 建表 + PRAGMA journal_mode=WAL 只做一次！
+        # setup() 里有 PRAGMA journal_mode=WAL，而 SQLite 切换日志模式需要独占访问：
+        # 多个连接（尤其在别的连接有活动事务时）各自执行，会切不动、退回 rollback
+        # journal，之后混着写就会抛 "attempt to write a readonly database"。
+        # 实测：这个是并发读写偶发失败的真凶（每线程独立库时不出现，因为每库只有
+        # 一个连接）。所以首个连接负责建库，后续连接直接标记已就绪、跳过 DDL。
+        with _ckpt_lock:
+            if path not in _ready_dbs or not os.path.exists(path):
+                saver.setup()
+                _ready_dbs.add(path)
+            else:
+                saver.is_setup = True
+
+        # 兜底：即便上面处理了，Windows 上仍可能偶发瞬时锁（杀软扫文件等），
+        # 只对数据库操作重试，不重跑模型——重跑整图会再花一次模型钱
+        for name in ("put", "put_writes", "get_tuple", "list"):
+            if hasattr(saver, name):
+                setattr(saver, name, _with_db_retry(getattr(saver, name)))
+        return saver
     except Exception:
         return MemorySaver()
 
 
-_app = None
+def get_app(db_path: str | None = None):
+    """取编译好的图（按库路径缓存，全局共享）。
 
+    为什么是全局单例而不是每线程一个：
+    SQLite 的 WAL 自动 checkpoint 需要独占锁，多个连接同时写同一个库时，
+    checkpoint 长期拿不到锁 → WAL 只涨不缩（实测涨到 4MB）→ 最终所有写都失败，
+    表现为满屏 "attempt to write a readonly database"，且**不可自愈**。
+    改用"一条连接 + 全局锁串行"后，SQLite 内部没有连接间争用，checkpoint 正常。
+    代价是并发请求在落盘时排队——但那是毫秒级，真正的耗时在网络调用上。
 
-def get_app():
-    global _app
-    if _app is None:
-        _app = build_graph(_make_checkpointer())
-    return _app
+    并发基准仍然可以每线程传不同 db_path，不同文件互不影响。
+    """
+    key = db_path or CHECKPOINT_DB
+    with _app_lock:
+        app = _apps.get(key)
+        if app is None:
+            app = build_graph(_make_checkpointer(db_path))
+            _apps[key] = app
+        return app
 
 
 def run_graph(query: str, session_id: str = "default",
               force_route: str | None = None,
               user_id: str = "",
-              use_cache: bool | None = None) -> dict:
+              use_cache: bool | None = None,
+              checkpoint_db: str | None = None) -> dict:
     """对外入口：与 agent.run() 返回字段完全一致。
 
     session_id  → 短期记忆（本段对话的上下文，checkpointer 持久化）
     user_id     → 长期记忆（跨会话的用户事实，SQLite user_facts 表）
     use_cache   → 语义缓存开关；None = 跟随全局配置。评测时显式传 False，
                   否则同义用例第二次出现会命中缓存，污染对照实验。
+    checkpoint_db → 会话状态落到哪个库；默认用主库。并发基准传独立文件，
+                  避免多线程争抢同一个 sqlite 的 WAL 文件。
     两个记忆键独立：新会话不会忘掉用户，新身份不会读到别人的会话。
     """
     query = (query or "").strip()
     if not query:
         return {"error": "empty query"}
 
-    app = get_app()
+    app = get_app(checkpoint_db)
     config = {"configurable": {"thread_id": session_id}}
     out = app.invoke(
         {"query": query, "force_route": force_route, "user_id": user_id,

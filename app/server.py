@@ -2,12 +2,15 @@
 
 from pathlib import Path
 
-from fastapi import FastAPI
+import sqlite3
+
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import cache, memory, store
 from .agent import run
+from .clients import local_breaker
 from .config import settings
 
 # LangGraph 编排（阶段一重构）：装了 langgraph 且未显式关闭就走图编排，
@@ -52,8 +55,20 @@ def index() -> FileResponse:
 @app.post("/api/chat")
 def api_chat(body: ChatIn) -> dict:
     if USE_GRAPH:
-        result = run_graph(body.query, session_id=body.session_id,
-                           force_route=body.force_route, user_id=body.user_id)
+        try:
+            result = run_graph(body.query, session_id=body.session_id,
+                               force_route=body.force_route, user_id=body.user_id)
+        except sqlite3.OperationalError as exc:
+            # 高并发下 SQLite 偶发写锁争用（checkpoint 落盘时）。
+            # 不要把堆栈甩给前端：告诉用户"重试一次"，并保留诊断信息。
+            msg = str(exc)
+            if "locked" in msg or "readonly" in msg:
+                raise HTTPException(
+                    status_code=503,
+                    detail="会话存储正忙（SQLite 写锁争用），请重试一次；"
+                           "批量压测请用 tools/cache_bench.py --workers",
+                ) from exc
+            raise
         engine = "langgraph"
     else:
         result = run(body.query, force_route=body.force_route)
@@ -66,7 +81,9 @@ def api_chat(body: ChatIn) -> dict:
 @app.get("/api/stats")
 def api_stats() -> dict:
     return {"summary": store.stats(), "recent": store.recent(8),
-            "cache": cache.stats() if settings.enable_cache else None}
+            "cache": cache.stats() if settings.enable_cache else None,
+            # 本地熔断状态：本地模型挂了时页面能看到"已短路"，不至于以为卡死
+            "local_breaker": local_breaker.state()}
 
 
 @app.get("/api/cache")

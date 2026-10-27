@@ -18,6 +18,7 @@ import sqlite3
 from datetime import datetime
 
 from .config import settings
+from .dbutil import with_retry
 
 _FACT_RULES: list[tuple[re.Pattern, object]] = [
     # (正则, key) —— key 是字符串或接收 match 的函数
@@ -41,7 +42,7 @@ _QUESTION_VALUE = re.compile(r"^(什么|啥|哪|怎样|怎么|如何|多少|几|
 
 def init() -> None:
     """建表（幂等）。与记账同库：事实量级很小，不值得为它单开一个文件。"""
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS user_facts ("
@@ -71,6 +72,7 @@ def extract(text: str) -> dict[str, str]:
     return facts
 
 
+@with_retry
 def remember(user_id: str, text: str) -> dict[str, str]:
     """抽取并落库。返回本轮实际写入/更新的事实。"""
     if not user_id or not text:
@@ -79,7 +81,7 @@ def remember(user_id: str, text: str) -> dict[str, str]:
     if not facts:
         return {}
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         for k, v in facts.items():
             conn.execute(
@@ -93,12 +95,13 @@ def remember(user_id: str, text: str) -> dict[str, str]:
     return facts
 
 
+@with_retry
 def recall(user_id: str, limit: int = 6) -> dict[str, str]:
     """召回某用户的事实，按最近更新排序，最多 limit 条。"""
     if not user_id:
         return {}
     try:
-        conn = sqlite3.connect(settings.db_path)
+        conn = sqlite3.connect(settings.db_path, timeout=10)
         rows = conn.execute(
             "SELECT fact_key, fact_value FROM user_facts WHERE user_id=?"
             " ORDER BY updated_at DESC LIMIT ?",
@@ -110,11 +113,12 @@ def recall(user_id: str, limit: int = 6) -> dict[str, str]:
     return {k: v for k, v in rows}
 
 
+@with_retry
 def forget(user_id: str) -> int:
     """清空某用户的长期记忆，返回删除条数。"""
     if not user_id:
         return 0
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         n = conn.execute("DELETE FROM user_facts WHERE user_id=?", (user_id,)).rowcount
     conn.close()
@@ -123,7 +127,7 @@ def forget(user_id: str) -> int:
 
 def count() -> int:
     try:
-        conn = sqlite3.connect(settings.db_path)
+        conn = sqlite3.connect(settings.db_path, timeout=10)
         n = conn.execute("SELECT COUNT(*) FROM user_facts").fetchone()[0]
         conn.close()
         return n

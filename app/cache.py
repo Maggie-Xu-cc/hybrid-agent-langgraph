@@ -42,6 +42,7 @@ import time
 from datetime import datetime, timedelta
 
 from .config import settings
+from .dbutil import with_retry
 
 # n-gram 混合权重：trigram 区分度高为主，uni/bigram 保证短句也能提出特征
 _NGRAM_WEIGHTS = ((1, 0.3), (2, 0.5), (3, 1.0))
@@ -89,7 +90,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def init() -> None:
     """建表（幂等）。与记账同库：缓存和成本统计是同一个故事的两半。"""
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_cache ("
@@ -109,6 +110,7 @@ def init() -> None:
     conn.close()
 
 
+@with_retry
 def lookup(query: str, threshold: float | None = None) -> dict | None:
     """查缓存。返回 {"answer","model","difficulty","score","hits"} 或 None。
 
@@ -122,7 +124,7 @@ def lookup(query: str, threshold: float | None = None) -> dict | None:
     now = time.time()
 
     try:
-        conn = sqlite3.connect(settings.db_path)
+        conn = sqlite3.connect(settings.db_path, timeout=10)
         rows = conn.execute(
             "SELECT query_hash, embedding, answer, model, difficulty,"
             " hits, updated_at FROM semantic_cache"
@@ -157,7 +159,7 @@ def lookup(query: str, threshold: float | None = None) -> dict | None:
         return None
 
     answer, model, difficulty, hits = best_row
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         # 注意：刷新的是"被匹配条目"的计数，不是当前查询的 hash——
         # 相似命中时两者不同，写错位置统计就全歪了。
@@ -170,6 +172,7 @@ def lookup(query: str, threshold: float | None = None) -> dict | None:
             "score": best_score, "hits": hits + 1}
 
 
+@with_retry
 def put(query: str, answer: str, model: str, difficulty: str,
         tokens_in: int = 0, tokens_out: int = 0, cost: float = 0.0) -> bool:
     """写入缓存。完全相同的查询已存在时不覆盖（答案没变，没必要）。
@@ -183,7 +186,7 @@ def put(query: str, answer: str, model: str, difficulty: str,
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for attempt in (1, 2):
         try:
-            conn = sqlite3.connect(settings.db_path)
+            conn = sqlite3.connect(settings.db_path, timeout=10)
             with conn:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO semantic_cache"
@@ -206,7 +209,7 @@ def put(query: str, answer: str, model: str, difficulty: str,
 def stats() -> dict:
     """缓存概况：条目数、累计命中、被省下的 token/成本。"""
     try:
-        conn = sqlite3.connect(settings.db_path)
+        conn = sqlite3.connect(settings.db_path, timeout=10)
         row = conn.execute(
             "SELECT COUNT(*) n, COALESCE(SUM(hits),0) hits,"
             " COALESCE(SUM(CASE WHEN hits>0 THEN tokens_in ELSE 0 END),0) tin,"
@@ -227,7 +230,7 @@ def purge_expired() -> int:
     """清掉过期且从未命中的条目，返回删除数。服务启动时调一次即可。"""
     cutoff = (datetime.now() - timedelta(days=settings.cache_ttl_days)
               ).strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         cur = conn.execute(
             "DELETE FROM semantic_cache WHERE updated_at < ? AND hits = 0",
@@ -239,7 +242,7 @@ def purge_expired() -> int:
 
 def clear() -> int:
     """清空全部缓存（API 用），返回删除条数。"""
-    conn = sqlite3.connect(settings.db_path)
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     with conn:
         cur = conn.execute("DELETE FROM semantic_cache")
     conn.close()

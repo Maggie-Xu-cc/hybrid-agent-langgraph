@@ -4,6 +4,7 @@ import sqlite3
 import time
 
 from .config import settings
+from .dbutil import connect, with_retry
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -25,16 +26,24 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.db_path, timeout=5)
+    # timeout = busy_timeout：并发写时排队等锁而不是立刻抛 database is locked
+    conn = sqlite3.connect(settings.db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init() -> None:
     with _conn() as conn:
+        # WAL 是库级持久设置，设一次即可：读不阻塞写、写不阻塞读，
+        # 并发跑基准/压测时不会互相卡死（默认的 rollback journal 会）
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
         conn.executescript(SCHEMA)
 
 
+@with_retry
 def record(
     query: str,
     route: str,

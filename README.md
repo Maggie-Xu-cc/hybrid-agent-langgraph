@@ -173,6 +173,47 @@ python -m uvicorn app.server:app --host 0.0.0.0 --port 8080
 
 本地模型的部署（AMD ROCm + transformers 自建 OpenAI 兼容服务）见 [docs/deploy.md](docs/deploy.md)。
 
+## 本机怎么跑最快
+
+没有 GPU、只有一台普通笔记本时，跑一轮完整缓存基准有三个提速开关，**可以叠加**：
+
+| 开关 | 作用 | 省多少 |
+|---|---|---|
+| `DISABLE_LOCAL=1` | 完全不调本地，所有请求直接走云端 | 省掉每条请求白等本地的 2~15 秒 |
+| `--easy-only` | 只跑 easy 用例（hard 按设计不进缓存，跑了也不计入命中率） | 调用量 72 → 39 次 |
+| `--workers 4~8` | 并发发起请求（瓶颈是网络等待，不是 CPU） | 串行 19.8s → 并发 7.2s |
+
+最快的一条命令：
+
+```bash
+DISABLE_LOCAL=1 python tools/cache_bench.py --easy-only --workers 4
+```
+
+本机实测（DeepSeek 云端，16 核 CPU，无本地 GPU）：
+
+| 跑法 | 调用次数 | 耗时 |
+|---|---|---|
+| 串行 + easy-only | 39 | 19.8 s |
+| 并发 4 + easy-only | 39 | **7.2 s** |
+| 并发 4 + 全量（含 hard） | 72 | 25.6 s |
+
+### 两个必须知道的坑（都已修掉）
+
+**1. 超时默认 600 秒。** openai SDK 不给 `timeout` 时默认十分钟，本地模型"端口通但不回"
+（Ollama 半死、vLLM 还在加载权重）会让每条请求白等十分钟，看起来就像卡死。
+现在 `LOCAL_TIMEOUT` 默认 15 秒，且失败 2 次后**熔断**——冷却 60 秒内直接跳过本地，
+调用立刻返回（实测 2146 ms → 0.00 ms），由上层走降级。冷却结束放一次试探，成功即恢复。
+
+**2. 并发写 SQLite 会偶发 `readonly database`。** 根因是 WAL 的自动 checkpoint 需要独占访问，
+多连接写同一个库时它永远抢不到，WAL 只涨不缩（实测涨到 4MB 上限）后**所有写入失败
+且不可自愈**。修法是反直觉的：**改回单连接 + 全局锁**，建库只做一次，DB 层再加一层重试
+（只重试 SQL，不重跑模型）。压测结果：60 次并发请求 **0 失败**，`ck.db-wal` 稳定在 4MB
+不再膨胀。落盘串行化的代价是毫秒级，而瓶颈在网络调用上，吞吐不受影响。
+
+> ⚠️ `DISABLE_LOCAL=1` 会跳过路由的模型层（第二层小模型分类），
+> 路由只能靠规则层和兜底层，**准确率会下降**——实测有 6 条标注 hard 的被规则层判成 easy。
+> 所以：**要快速看效果就用它；要写进报告的数字，请在本地模型可用时跑。**
+
 ## 云端实验：三条命令
 
 ```bash
@@ -220,6 +261,27 @@ python tools/bench_throughput.py --concurrency 1,4,8 --num-prompts 16
 | 全云端 | 2067 ms | ¥0.0829 | 100% | — | 0 |
 | 混合路由 | 2165 ms | ¥0.0714 | **86.1%** | **95.8%** | 3 |
 
+### 语义缓存实测（v1.3）
+
+> 2026-10-27，DeepSeek 云端真实调用，`DISABLE_LOCAL=1`（本机无 GPU），
+> 13 条 easy 用例 × 3 遍，`python tools/cache_bench.py --easy-only --workers 4`
+
+| 轮次 | 请求数 | 命中 | 命中率 | 总成本 | 平均延迟 | 相对基线 |
+|---|---|---|---|---|---|---|
+| 第 1 遍（缓存空，基线） | 13 | 0 | 0% | ¥0.0090 | 1051 ms | 100% |
+| 第 2 遍（相同问题，精确命中） | 13 | 13 | **100%** | ¥0.0000 | **0 ms** | **0%** |
+| 第 3 遍（改写问法，语义命中） | 13 | 9 | **69.2%** | ¥0.0055 | 391 ms | 61% |
+
+三点如实说：
+
+- **第 2 遍成本归零**：完全相同的问法走 md5 精确通道，命中即返回，0 token 0 元 0 ms。
+- **第 3 遍 69.2% 是 n-gram 方案的真实天花板**：它只认字面 n-gram 重叠，换个说法问到
+  "结构不同但意思一样"时就漏。这个数字正是下一步换本地 embedding 模型的论据——
+  `cache.embed()` 是独立函数，换模型上层一行不改。
+- 全量（24 条含 hard）跑出来第 2 遍命中 19/24 而不是 13/24，多出来的是标注 hard 却被
+  规则层判成 easy 的用例——因为 `DISABLE_LOCAL=1` 关掉了路由的模型层。
+  要出报告数字，本地模型必须在位。
+
 ## 成本模型
 
 ```
@@ -240,7 +302,7 @@ python tools/bench_throughput.py --concurrency 1,4,8 --num-prompts 16
 ```
 app/
   config.py    环境变量
-  clients.py   OpenAI 兼容客户端（本地/云端）+ 离线 mock
+  clients.py   OpenAI 兼容客户端（本地/云端）+ 离线 mock + 本地熔断器
   router.py    三层难度路由
   agent.py     基线主流程（显式三步，ENABLE_LANGGRAPH=0 时使用）
   graph.py     LangGraph 编排主流程（默认）：缓存查找 + 条件边 + 自检升级 + 记账 + 会话记忆
@@ -256,10 +318,11 @@ eval/
 tools/
   capacity_plan.py   算力需求测算（三阶段预算）
   bench_throughput.py 并发压测（测单卡 tok/s）
-  cache_bench.py      语义缓存基准（命中率/成本对比，--mock 可离线）
+  cache_bench.py      语义缓存基准（命中率/成本对比，--mock 可离线，--workers 并发）
   smoke_langgraph.py  LangGraph 链路冒烟测试（离线）
   smoke_memory.py     记忆与上下文冒烟测试（离线，26 项断言）
   smoke_cache.py      语义缓存冒烟测试（离线，36 项断言）
+  smoke_breaker.py    本地熔断器冒烟测试（离线，17 项断言）
 deploy/
   start_vllm.sh  环境判定 + 下权重 + 起 vLLM（换独立显卡后的备用脚本）
   run_all.py     一键采集：压测 + 评测 + 算力重算 + 归档
