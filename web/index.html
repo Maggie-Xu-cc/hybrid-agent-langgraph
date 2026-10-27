@@ -165,6 +165,33 @@
   }
   .guard-box .q { color: #9b5a5a; font-size: 11.5px; margin-top: 4px; }
 
+  /* 工具调用：这一轮它真的动了手，过程要能一层层展开看 */
+  .toolbox {
+    margin: 10px 0 2px; border: 1px solid #d5e7e0; border-radius: 10px;
+    background: #f6fbf9; overflow: hidden;
+  }
+  .toolbox > summary {
+    display: flex; gap: 8px; align-items: center; cursor: pointer;
+    padding: 6px 10px; background: #eaf6f2; font-size: 12px; color: #0f6e56;
+    list-style: none; user-select: none;
+  }
+  .toolbox > summary::-webkit-details-marker { display: none; }
+  .toolbox > summary .why { margin-left: auto; color: #86837a; font-weight: 400; }
+  .tstep {
+    display: flex; gap: 8px; align-items: baseline; padding: 5px 10px;
+    font-size: 12px; border-top: 1px solid #e2efe9;
+  }
+  .tstep .n { color: #a8b3ae; flex: 0 0 12px; }
+  .tstep .nm { font-family: ui-monospace, Consolas, monospace; font-weight: 600; color: #22221f; }
+  .tstep .ar {
+    flex: 1; min-width: 0; color: #86837a; font-size: 11.5px;
+    font-family: ui-monospace, Consolas, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tstep .st { color: #0f6e56; white-space: nowrap; font-size: 11.5px; }
+  .tstep.fail .st { color: var(--guard); }
+  .tstep.rep .st { color: #9b978d; }
+
   .detail { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
   .detail summary {
     cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; user-select: none;
@@ -476,7 +503,43 @@ function metaLine(meta) {
   // 相似度：命中时说明"凭什么复用"，被拦时说明"凭什么不敢复用"
   const sc = Number(meta.hit_score || 0);
   if (sc > 0) parts.push(`相似度 <b>${sc.toFixed(3)}</b>`);
+  if (meta.tools && meta.tools.used) parts.push(`工具 <b>${meta.tools.calls || 0} 次</b>`);
   return `<div class="meta">${parts.join('<span style="color:#ddd9d0">·</span>')}</div>`;
+}
+
+const STOP_LABEL = {
+  '': '',
+  answer: '',
+  max_steps: '到步数上限',
+  budget: '到预算上限',
+  no_progress: '在打转，提前收口',
+  error: '链路出错，已降级',
+};
+
+// 工具调用轨迹。为什么不合并进 metaLine 一行字：
+// "调了 3 次工具" 这句话本身没有信息量，能证明它会动手的是**每一步的参数和结果**。
+// 所以默认展开，小屏也能一眼看到"它去查了哪张表、跑了什么代码"。
+function toolBox(tools) {
+  if (!tools || !tools.used) return '';
+  const steps = tools.steps || [];
+  const rows = steps.map((s) => `
+    <div class="tstep ${s.ok ? '' : 'fail'} ${s.repeat ? 'rep' : ''}">
+      <span class="n">${esc(String(s.n || ''))}</span>
+      <span class="nm">${esc(s.name || '')}</span>
+      <span class="ar" title="${esc(s.args || '')}">${esc(s.args || '')}</span>
+      <span class="st">${s.repeat ? '重复·跳过'
+        : (s.ok ? (esc(s.summary || '完成') + (s.ms ? ' · ' + s.ms + 'ms' : ''))
+                : esc(s.error || '失败'))}</span>
+    </div>`).join('');
+  return `
+    <details class="toolbox" open>
+      <summary>
+        <b>工具调用 · ${tools.calls || 0} 次</b>
+        <span>${esc(STOP_LABEL[tools.stop] || '')}</span>
+        <span class="why">${tools.reason ? '因为' + esc(tools.reason) : ''}</span>
+      </summary>
+      ${rows}
+    </details>`;
 }
 
 function guardBox(meta) {
@@ -511,7 +574,20 @@ function buildStream(messages, turns) {
     if (t) {
       const prevUser = [...out].reverse().find((x) => x.role === 'user');
       const same = prevUser && (t.query || '').slice(0, 24) === (prevUser.content || '').slice(0, 24);
-      if (!prevUser || same) meta = { ...t, hit_score: t.cache_score };
+      if (!prevUser || same) {
+        const steps = Array.isArray(t.tool_steps) ? t.tool_steps : [];
+        meta = {
+          ...t,
+          hit_score: t.cache_score,
+          tools: {
+            used: steps.length > 0,
+            calls: steps.filter((x) => !x.repeat).length,
+            steps,
+            stop: '',
+            reason: '',
+          },
+        };
+      }
     }
     out.push({ role, content: m.content, meta });
     if (t) ti++;
@@ -537,6 +613,7 @@ function nodeHtml(item) {
   return `
     <div class="msg ai"><div class="card">
       <div class="ai-head">${badgeHtml(m)}</div>
+      ${toolBox(m && m.tools)}
       <div class="answer">${mdInline(item.content)}</div>
       ${guardBox(m)}
       ${metaLine(m)}
@@ -663,6 +740,7 @@ async function send() {
       guard_blocked: (d.cache_guard && d.cache_guard.blocked) ? d.cache_guard.reason : '',
       guard_matched: d.cache_guard ? d.cache_guard.matched : '',
       hit_score: (d.cache_hit ? d.cache_score : (d.cache_guard ? d.cache_guard.score : null)),
+      tools: d.tools || null,
     };
 
     // 检索来源：答案不是编的唯一证据，所以要让出处可见
@@ -796,12 +874,14 @@ async function refreshGlobal() {
   try {
     // 两个接口一起取：/api/stats 是"跑了多少"，/api/cache 是"缓存怎么配的"。
     // 拆开是后端的分工，页面没必要跟着分两次等待。
-    const [stats, cfg] = await Promise.all([
+    const [stats, cfg, tl] = await Promise.all([
       fetch('/api/stats?session_id=' + encodeURIComponent(sessionId) + '&recent_limit=40').then((r) => r.json()),
       fetch('/api/cache').then((r) => r.json()).catch(() => null),
+      fetch('/api/tools').then((r) => r.json()).catch(() => null),
     ]);
     window.__stats = stats;
     window.__cacheCfg = cfg;
+    window.__tools = tl;
     if (stats.local_model) window.__localModel = stats.local_model;
     renderDrawer(stats);
   } catch (e) { /* 统计失败不影响聊天 */ }
@@ -843,7 +923,20 @@ function renderDrawer(d) {
       ${kv('平均延迟', (s.avg_latency_ms || 0) + 'ms')}
       ${kv('缓存命中', (s.cache_hits || 0) + ' 次', s.cache_hit_ratio ? `${(s.cache_hit_ratio * 100).toFixed(0)}%` : '')}
       ${kv('门卫拦截', s.guard_blocks || 0, '次')}
+      ${kv('动手的请求', s.tool_runs || 0, '轮')}
+      ${kv('工具调用', s.tool_steps_total || 0, '步')}
     </div>
+
+    <div class="sec-t">工具（Agent 能做的动作）</div>
+    <div class="grid2">
+      ${(window.__tools && window.__tools.tools ? window.__tools.tools : []).map((x) =>
+        kv(esc(x.name), x.level === 'danger' ? '危险级' : '只读',
+           x.description ? esc(x.description.slice(0, 26)) : '')).join('')
+        || kv('工具', '未启用')}
+    </div>
+    <div class="note">循环上限 ${(window.__tools && window.__tools.max_steps) || '—'} 步 ·
+      单次预算 ¥${(window.__tools && window.__tools.budget_cny) || '—'} ·
+      结果超 ${(window.__tools && window.__tools.result_chars) || '—'} 字自动截断</div>
 
     <div class="sec-t">语义缓存</div>
     <div class="grid2">
