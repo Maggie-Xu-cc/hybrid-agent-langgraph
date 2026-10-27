@@ -67,8 +67,10 @@ class Review:
 
 # ---------------- 第一层：确定性数字核对 ----------------
 
-# 抓数字：允许千分位和百分号，避免把 "1,048,576" 切成两截
-_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?%?")
+# 抓数字：允许千分位、百分号和科学计数法。
+# 科学计数法必须整体匹配——否则 "1e-10" 会被拆成 "1" 和 "10"，
+# 那个 "10" 再到证据里找不到，就误报成"编的数字"（实测踩过）。
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?%?")
 
 
 def _norm(raw: str) -> str:
@@ -205,7 +207,11 @@ def review(query: str, answer: str, evidence: str = "", *, min_score: int = 70,
     except (TypeError, ValueError):
         score = 0
     issues = [str(x)[:160] for x in (obj.get("issues") or []) if str(x).strip()]
-    passed = bool(obj.get("pass")) and score >= min_score and not issues
+    # 判据只看"模型自己判没判过 + 分数够不够"，**不再要求 issues 为空**。
+    # 早期版本是"有意见就打回"，结果线上把一条 85 分、模型判 pass 的答案打回了，
+    # 理由只是"某句属于轻微外推"——白花一次返工的钱，还把答案改坏了。
+    # 严重程度模型已经用 pass 和 score 表达过了，再拿 issues 空不空卡一次等于重复计罪。
+    passed = bool(obj.get("pass")) and score >= min_score
     return Review(passed=passed, score=score, issues=issues,
                   hint=str(obj.get("fix_hint") or "")[:200], tin=tin, tout=tout)
 

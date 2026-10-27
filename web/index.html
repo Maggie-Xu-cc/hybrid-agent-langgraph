@@ -1165,8 +1165,9 @@ function renderDrawer(d) {
       ${kv('最多返工', ((window.__tools && window.__tools.critic && window.__tools.critic.max_rounds) || 0) + ' 次')}
       ${kv('及格线', ((window.__tools && window.__tools.critic && window.__tools.critic.min_score) || 0) + ' 分')}
       ${kv('审过的轮次', (s.critic_reviewed || 0) + ' 轮')}
-      ${kv('被打回', (s.critic_failed || 0) + ' 轮')}
-      ${kv('真改了', (s.critic_fixed || 0) + ' 轮')}
+      ${kv('打回返工', (s.critic_fixed || 0) + ' 轮')}
+      ${kv('仍未通过', (s.critic_failed || 0) + ' 轮',
+           '打回也改不好——比"通过"更值得盯')}
     </div>
     <div class="note">审查分两层：先做数字核对（零成本，答案里的数字必须能在证据里找到），
       再由模型审"有没有依据、有没有答非所问"。没过审查的答案不写缓存——

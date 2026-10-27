@@ -162,9 +162,9 @@ def stats() -> dict:
             " AND tool_steps != '' THEN tool_steps ELSE '[]' END)),0) steps"
             " FROM runs"
         ).fetchone()
-        # 审查的账：审了多少轮、有几轮被打回、有几轮真改了。
-        # "打回但没改"（critic_pass=0 且 fixes=0）要单独能看出来——
-        # 那说明审查员在报问题，而返工没起作用，这种状态最容易被数字掩盖。
+        # 审查的账：审了多少轮、有几轮返工、几轮最终仍未通过。
+        # 三个数要分开看：reviewed 是覆盖面，fixed 是"打回真起了作用"，
+        # failed 是"打回也没改好"——后两者混在一起，就分不清审查员是有用还是空转。
         critic_row = conn.execute(
             "SELECT COALESCE(SUM(CASE WHEN critic_rounds > 0 THEN 1 ELSE 0 END),0) reviewed,"
             " COALESCE(SUM(CASE WHEN critic_rounds > 0 AND critic_pass = 0 THEN 1 ELSE 0 END),0) failed,"

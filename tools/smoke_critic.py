@@ -150,6 +150,9 @@ check("四舍五入的派生数字 → 放行", g("平均 0.01 元", "avg = 0.00
       str(g("平均 0.01 元", "avg = 0.009561")))
 check("差得远的数字仍然报", len(g("平均 0.05 元", "avg = 0.009561")) == 1)
 check("2% 以内的近似值 → 放行", g("约 101 条", "100 条") == [])
+# 科学计数法要整体识别："1e-10" 不能被拆成 1 和 10，否则误报
+check("科学计数法不算幻觉", g("误差约 1e-10", "差值 1e-10") == [],
+      str(g("误差约 1e-10", "差值 1e-10")))
 check("最多报 3 条（够提示，不刷屏）",
       len(g("1 个 22 个 33 个 44 个 55 个", "无关")) == 3,
       str(len(g("1 个 22 个 33 个 44 个 55 个", "无关"))))
@@ -174,8 +177,11 @@ def boom(messages, max_tokens=None):
 r = critic_mod.review("问题", "答案", "证据 42", model_fn=boom)
 check("审查员调用报错 → 放行（不拖垮主链路）", r.passed and r.by == "error", f"{r.passed}/{r.by}")
 
-r = critic_mod.review("问题", "答案", "证据 42", model_fn=CloudScript(verdict(True, 90, ["有个小问题"])))
-check("自己说 pass 但提了问题 → 打回（有意见就别放行）", not r.passed, str(r.brief()))
+r = critic_mod.review("问题", "答案", "证据 42", model_fn=CloudScript(verdict(True, 90, ["有个小建议"])))
+check("判 pass + 高分 + 只有建议 → 放行（建议只展示）", r.passed, str(r.brief()))
+check("建议仍然带出来给页面看", r.issues == ["有个小建议"], str(r.issues))
+r = critic_mod.review("问题", "答案", "证据 42", model_fn=CloudScript(verdict(False, 90)))
+check("自己判 pass=False → 打回（哪怕分数高）", not r.passed, str(r.brief()))
 
 r = critic_mod.review("问题", "答案", "证据 42", min_score=70,
                       model_fn=CloudScript(verdict(True, 50)))
