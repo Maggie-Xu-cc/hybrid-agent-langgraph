@@ -1,0 +1,16 @@
+# 语义缓存的「真尺子」：本地 BGE 向量模型（app/embedder.py）
+#
+# 为什么单独一个文件，而不是放进 requirements.txt：
+#   云端部署也会读 requirements.txt。但云端没有模型文件（models/ 91MB 不入库），
+#   装了 onnxruntime 也只是空转，还多 20MB 下载和一次安装失败的风险。
+#   所以这里放"本地开发可选增强"，requirements.txt 只留跑起来必需的东西。
+#
+# 装了之后：
+#   python tools/fetch_model.py     # 下 91MB 模型到 models/bge-small-zh/
+#   再启动就会自动用上（EMBED_BACKEND=auto 检测到模型才启用）
+#
+# 不装的代价（实测，见 docs/evidence/threshold_sweep.md）：
+#   n-gram 把「您好呀」和「你好」的相似度算成 0.11，同义改写基本召不回来；
+#   BGE 算成 0.82。命中率差约 13 个百分点，但没有一条错答案的风险（守卫兜着）。
+onnxruntime>=1.20
+tokenizers>=0.15

@@ -5,3 +5,8 @@ python-dotenv>=1.0
 pydantic>=2.6
 langgraph>=1.0
 langgraph-checkpoint-sqlite>=2.0
+
+# 语义缓存的本地向量模型（BGE）是可选增强，见 requirements-bge.txt。
+# 不装也能跑：EMBED_BACKEND=auto 检测不到模型就退回 n-gram 后端，
+# 缓存的正确性由 app/cacheguard.py 的载荷守卫保证——它与后端无关。
+# 云端故意不装：没有模型文件时装 onnxruntime 只是空转，还多一次安装失败风险。

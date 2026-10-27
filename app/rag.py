@@ -42,6 +42,8 @@ import json
 import math
 import re
 import sqlite3
+import threading
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -190,6 +192,7 @@ def index_dirs(dirs: list[str] | None = None, root: Path | None = None) -> dict:
                 total_chunks += n
             else:
                 skipped.append(f"{p.relative_to(root).as_posix()}(无有效内容)")
+    invalidate_version()
     return {"docs": total_docs, "chunks": total_chunks, "skipped": skipped}
 
 
@@ -415,3 +418,41 @@ def stats() -> dict:
         return {"docs": 0, "chunks": 0, "chars": 0, "updated_at": ""}
     return {"docs": row["d"], "chunks": row["n"],
             "chars": row["chars"], "updated_at": row["ts"] or ""}
+
+
+# ---------------- 知识库版本（缓存复用要用） ----------------
+
+_ver_lock = threading.Lock()
+_ver_cache: tuple[str, float] | None = None
+_VER_TTL = 5.0        # 秒。版本号查库要一次 SQL，5 秒内复用结果
+
+
+def version() -> str:
+    """知识库版本：篇数 / 块数 / 最后写入时间。
+
+    为什么语义缓存需要它：
+        原来的规则是"检索命中过的问题一律不写缓存"，理由是"答案依赖文档内容，
+        改了文档缓存就过期"。这个顾虑是对的，但**做法太粗**——结果是只要有知识库，
+        缓存就永远不写（线上 entries 一直是 0）。正确做法是记下生成答案时的知识库
+        版本，命中时比对：一样就复用，不一样就自动失效。粒度从"有没有用检索"变成
+        "文档有没有变过"，缓存才真正工作起来。
+
+    5 秒 TTL 的理由：这个函数在每次缓存查找/写入时都会调用，不能每次都查库；
+    而重建索引通常持续数秒，5 秒的缓存窗口既够快，也不会让新版本迟迟不生效。
+    """
+    global _ver_cache
+    now = time.monotonic()
+    if _ver_cache is not None and _ver_cache[1] > now:
+        return _ver_cache[0]
+    st = stats()
+    ver = f"{st['docs']}:{st['chunks']}:{st['updated_at']}"
+    with _ver_lock:
+        _ver_cache = (ver, now + _VER_TTL)
+    return ver
+
+
+def invalidate_version() -> None:
+    """重建索引后立刻作废版本缓存，让新版本马上生效。"""
+    global _ver_cache
+    with _ver_lock:
+        _ver_cache = None

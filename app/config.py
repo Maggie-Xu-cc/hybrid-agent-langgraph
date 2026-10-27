@@ -51,11 +51,28 @@ class Settings:
     mock_mode: bool = os.getenv("MOCK_MODE", "0") == "1"
 
     # 语义缓存（app/cache.py）：相似问题直接复用答案，成本降为 0
-    # threshold=0.45 是实测校准值：同义改写对 n-gram 余弦通常 ≥0.5，无关问题 ≤0.3
+    # threshold = "抄答案分数线"，含义完全取决于用哪把尺子，所以默认 0 = 按后端自动取：
+    #   bge   → 0.60（实测 precision 100%、错误率 0、命中率 47%）
+    #   ngram → 0.35（F0.5 最优；配合守卫 precision 96.7%）
+    # 实测数据见 docs/evidence/threshold_sweep.md，脚本 tools/threshold_sweep.py。
+    # 换后端必须重新标定——两个后端的分数分布完全不同，阈值不能互相搬。
     enable_cache: bool = os.getenv("ENABLE_CACHE", "1") == "1"
-    cache_threshold: float = float(os.getenv("CACHE_THRESHOLD", "0.45"))
+    cache_threshold: float = float(os.getenv("CACHE_THRESHOLD", "0"))
     cache_ttl_days: int = int(os.getenv("CACHE_TTL_DAYS", "7"))
     cache_cache_hard: bool = os.getenv("CACHE_CACHE_HARD", "0") == "1"
+    # 载荷守卫（app/cacheguard.py）：向量粗筛之后再比一遍数字/单位/缩写/说法/褒贬。
+    # 不带守卫实测最优阈值 precision 只有 66%，带上后 96%——见 docs/evidence/threshold_sweep.md
+    cache_guard: bool = os.getenv("CACHE_GUARD", "1") == "1"
+
+    # 向量后端（app/embedder.py）
+    #   auto  模型文件在就用 bge，不在就 ngram（默认，部署包不带 91MB 模型也能跑）
+    #   bge   强制本地小模型，加载失败降级
+    #   ngram 强制字面 n-gram
+    # 换后端会让旧缓存条目自动失效（维度不同不能比），这是有意的。
+    embed_backend: str = os.getenv("EMBED_BACKEND", "auto")
+    bge_model_dir: str = os.getenv("BGE_MODEL_DIR", "models/bge-small-zh")
+    bge_max_len: int = int(os.getenv("BGE_MAX_LEN", "128"))
+    bge_threads: int = int(os.getenv("BGE_THREADS", "2"))
 
     # RAG 检索（app/rag.py）：从本地文档召回相关片段注入 prompt
     # bm25_min 是实测校准的门槛：相关问题量产出的 BM25 最高分在 6~23，无关问题在 0~5

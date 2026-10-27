@@ -98,17 +98,41 @@ system 人设（必留）＋ 长期记忆事实（≤200 tok）＋ 早前摘要�
 
 实现要点（每条都是面试可展开的取舍）：
 
-- **查询向量化零成本**：字符 n-gram hashing 到 256 维归一化向量（`embed()` 纯 Python，毫秒级）。为缓存再调一次 embedding API 就本末倒置——`embed()` 是独立函数，将来换 BGE 等真 embedding 模型只改这一个函数
-- **阈值实测校准**：同义改写对 n-gram 余弦通常 ≥0.5、无关问题 ≤0.3，默认阈值取 0.45（`CACHE_THRESHOLD`）。短句寒暄召回弱是已知边界（好在寒暄本来就走 0 成本规则路由）
+- **两级过滤，缺一不可**：向量粗筛判「讲的是不是同一件事」，载荷守卫再判「参数是否一致」（数字 / 单位 / 缩写 / 说法 / 褒贬）。只用向量时 precision 66%，加上守卫到 100%——**因为句向量天生看不见 3点15→3点45 这种一字之差**，详见下面的校准记录
+- **向量用本地小模型，仍然零 API 成本**：BGE-small-zh-v1.5（ONNX + CPU，512 维，单条约 4ms）。"缓存不能自己花钱"这个直觉是对的，但零的是 API 成本、不是零模型。模型缺失时自动退回 n-gram 后端（`EMBED_BACKEND=auto`），主流程不受影响
+- **阈值随后端自动取**：bge→0.60、ngram→0.35（`CACHE_THRESHOLD=0` 表示自动）。两个后端的分数分布完全不同，阈值不能互相搬——换后端必须重新标定
 - **只缓存首轮独立问题**：多轮问题（"继续""为什么"）依赖会话上下文，换会话直接复用会答错——宁可少命中，不可答错。hard 请求默认不缓存（质量敏感+重复率低），`CACHE_CACHE_HARD=1` 可打开
 - **两段式查找**：归一化 hash 精确匹配 O(1) 优先，再相似度线性扫描（条目量级小，毫秒级）；等量级上万再上向量库
 - **TTL 过期**（默认 7 天）+ 命中刷新：过期答案可能已过时（"今天天气"），一律不返回
+- **三条失效路径**：TTL 管"时间让答案过时"、`embed_model` 管"换了向量后端维度不同不能比"、`kb_version` 管"知识库改过、基于旧文档的答案不成立"。第三条原来是"检索命中就不写缓存"，导致线上有知识库时缓存条目恒为 0（详见 `docs/code-reading.md` 第 17 节）
+
+#### 阈值校准记录（v1.6：0.45 被推翻）
+
+早期版本用 n-gram + 阈值 0.45，验证方式是「24 个问题跑三遍看命中率」。这套验证有个致命缺陷：
+**测试集里只有"该命中"的样本，没有"不该命中"的**，所以任何阈值都显得很好。
+
+补齐 26 条「正确答案不在缓存里」的危险样本后（`eval/pairs.jsonl`，89 条），
+扫遍 0.20~0.99 得到的结论是：**那个阈值不是调得不准，是尺子不对**。
+
+| 配置 | 最优阈值 | 命中率 | Precision | F0.5 | 错误率 |
+|---|---|---|---|---|---|
+| n-gram | 0.35 | 59.6% | 56.6% | 0.579 | 25.8% |
+| n-gram + 守卫 | 0.35 | 33.7% | 96.7% | 0.868 | 1.1% |
+| BGE | 0.60 | 69.7% | 66.1% | 0.693 | 23.6% |
+| **BGE + 守卫** | **0.60** | **47.2%** | **100.0%** | **0.972** | **0.0%** |
+
+关键一点：命中率从 59.6% 掉到 47.2%，但**错误率从 25.8% 归零**。这个交换是值得的——
+漏命中只是多花一份钱，误命中是让用户拿着错答案去办事。
+完整曲线、AUC、被守卫拦下的案例见 `docs/evidence/threshold_sweep.md`，
+一键复现：`python tools/threshold_sweep.py --write`。
 
 评测时显式关缓存（`run_graph(..., use_cache=False)`），否则同义用例第二次出现命中缓存，污染对照实验。
 
 - `GET /api/cache` → 缓存概况（条目/命中/省下的 token 与成本）
 - `DELETE /api/cache` → 清空缓存
-- 冒烟测试（离线，36 项断言）：`python tools/smoke_cache.py`
+- 冒烟测试（离线，46 项断言）：`python tools/smoke_cache.py`
+- 阈值扫描（四种配置对照，输出 P/R/F0.5 曲线）：`python tools/threshold_sweep.py --write`
+- 下载本地向量模型（91MB，可选）：`python tools/fetch_model.py`
 - 基准（两遍原始问题 + 一遍改写问法）：`python tools/cache_bench.py`（加 `--mock` 离线跑）
 
 ### 分层追踪（v1.3）
@@ -208,6 +232,14 @@ python eval/run_eval.py --engine both    # 跑两遍 + 逐条一致性对比
 pip install -r requirements.txt
 cp .env.example .env          # 填入云端 API Key
 python -m uvicorn app.server:app --host 0.0.0.0 --port 8080
+```
+
+想让语义缓存用上"真尺子"（BGE 向量，同义改写召回 +13 个百分点）再加两行——
+不装也能跑，会自动退回 n-gram，正确性由载荷守卫保证：
+
+```bash
+pip install -r requirements-bge.txt
+python tools/fetch_model.py   # 下 91MB 模型到 models/，纯 CPU，零 API 成本
 ```
 
 `MOCK_MODE=1` 可以完全离线跑通（不需要 GPU、不需要 Key），用于先联调页面与记账逻辑。
@@ -334,8 +366,10 @@ python tools/bench_throughput.py --concurrency 1,4,8 --num-prompts 16
 
 - **第 2 遍成本归零**：完全相同的问法走 md5 精确通道，命中即返回，0 token 0 元 0 ms。
 - **第 3 遍 69.2% 是 n-gram 方案的真实天花板**：它只认字面 n-gram 重叠，换个说法问到
-  "结构不同但意思一样"时就漏。这个数字正是下一步换本地 embedding 模型的论据——
-  `cache.embed()` 是独立函数，换模型上层一行不改。
+  "结构不同但意思一样"时就漏。这组数据是**改造前**的对照基线（v1.3，n-gram + 阈值 0.45），
+  v1.6 换成 BGE 向量 + 载荷守卫后，同一批评测集上语义召回 87.5%、precision 100%，
+  见上文「阈值校准记录」。注意这套 bench 只测命中率、不测正确率——所以它给的 69.2%
+  其实是虚高的，真实精度当时只有 56%。
 - 全量（24 条含 hard）跑出来第 2 遍命中 19/24 而不是 13/24，多出来的是标注 hard 却被
   规则层判成 easy 的用例——因为 `DISABLE_LOCAL=1` 关掉了路由的模型层。
   要出报告数字，本地模型必须在位。
@@ -389,7 +423,9 @@ app/
   router.py    三层难度路由
   agent.py     基线主流程（显式三步，ENABLE_LANGGRAPH=0 时使用）
   graph.py     LangGraph 编排主流程（默认）：缓存查找 + 条件边 + 自检升级 + 记账 + 会话记忆
-  cache.py     语义缓存：n-gram 向量相似度匹配（插在路由之前）
+  cache.py     语义缓存：向量粗筛 + 载荷守卫两级过滤（插在路由之前）
+  embedder.py  文本向量：本地 BGE-small-zh（ONNX/CPU）与 n-gram 后端自动切换
+  cacheguard.py 载荷守卫：判数字/单位/缩写/说法/褒贬是否一致，拦住"字面 0.97 但答错"的命中
   rag.py       RAG 检索：markdown 切块 + BM25/向量双路召回 + 分数截断
   context.py   上下文工程：token 预算分配与 prompt 组装（system/记忆/检索/摘要/历史）
   memory.py    长期记忆：事实抽取（正则）、落库、召回、遗忘
@@ -401,16 +437,19 @@ demo_server.py 云端部署入口（读 PORT、绑 0.0.0.0、自动判定要不�
 run_server.py  本地 PyCharm 入口（127.0.0.1:8080，右键 Run 即用）
 web/index.html 演示页面（自动生成并复用 session_id 与 user_id，「新会话」/「忘掉我」）
 eval/
-  testset.jsonl  标注测试集
+  testset.jsonl  标注测试集（24 条，用于跑成本/路由对比）
+  pairs.jsonl    缓存阈值评测集（89 条，含 26 条"正确答案不在缓存里"的危险负样本）
   run_eval.py    三策略对比（--engine plain|graph|both 选链路，both 会逐条比对一致性）
 tools/
   capacity_plan.py   算力需求测算（三阶段预算）
   bench_throughput.py 并发压测（测单卡 tok/s）
   cache_bench.py      语义缓存基准（命中率/成本对比，--mock 可离线，--workers 并发）
+  threshold_sweep.py  阈值扫描：四种配置（n-gram/BGE × 有无守卫）的 P/R/F0.5 曲线
+  fetch_model.py      下载本地向量模型（91MB，可选；不装则自动用 n-gram 后端）
   build_kb.py         构建 RAG 知识库索引（改完 docs 要重跑）
   smoke_langgraph.py  LangGraph 链路冒烟测试（离线）
   smoke_memory.py     记忆与上下文冒烟测试（离线，26 项断言）
-  smoke_cache.py      语义缓存冒烟测试（离线，36 项断言）
+  smoke_cache.py      语义缓存冒烟测试（离线，46 项断言）
   smoke_rag.py        RAG 检索冒烟测试（离线，44 项断言）
   smoke_breaker.py    本地熔断器冒烟测试（离线，17 项断言）
 deploy/
@@ -420,6 +459,7 @@ deploy/
   aup_setup.sh       AUP 环境自检 + 装依赖 + 预下权重（--install / --predownload）
   prepare_bundle.py  生成部署包（白名单拷贝，避免把 venv 和本地数据库传上云）
 requirements-aup.txt   AUP 专用追加依赖（transformers；torch 用镜像自带的 ROCm 版）
+requirements-bge.txt   本地 BGE 向量模型依赖（可选：装了缓存才用真 embedding）
 docs/evidence/   实验结果与原始日志（RESULTS.md 为自动生成的汇总）
 docs/aup-quickstart.md   AUP 照抄版上手指南（每步应该看到什么 / 会话怎么拆）
 docs/deploy.md   AMD ROCm 部署手册

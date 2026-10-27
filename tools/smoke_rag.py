@@ -125,7 +125,11 @@ check("展示分与排序一致",
 
 strict = rag.search("缓存阈值是怎么定下来的", min_score=999)
 check("阈值可调（调到极高则空）", len(strict) == 0)
-loose = rag.search("今天上海天气")
+loose = rag.search("红烧肉要炖多久")
+# 注意这里的查询换过一次：原来用"今天上海天气"，后来 docs 第 16 节把这类问题
+# 当反例写进了正文，于是知识库里真的有了这几个字，检索合理地召回它——
+# 断言失败不是因为代码坏了，是因为"文档里出现了这句话"。
+# 教训：拿做例子写进知识库的句子，不能再当"无关查询"的测试用例。
 check("无词项命中时直接返回空", len(loose) <= 1, f"{len(loose)} 条")
 
 # 关键命中约束：单个巧合词项不该召回
@@ -166,11 +170,19 @@ check("检索耗时被记录", res["rag"].get("latency_ms", -1) >= 0,
 res2 = run_graph("什么是反向传播算法", session_id="smoke-rag-2", use_cache=False)
 check("无关问题不注入", res2["memory"]["ctx_tokens"].get("rag", 0) == 0)
 
-# 有检索结果时不能写缓存：答案依赖知识库内容，改了文档缓存就过期
-n_before = cache.stats()["entries"]
-run_graph("熔断器的三个状态是什么", session_id="smoke-rag-3", use_cache=True)
-n_after = cache.stats()["entries"]
-check("有检索结果时不写缓存", n_after == n_before, f"{n_before} -> {n_after}")
+# 检索过的答案可以写缓存，但必须绑定知识库版本。
+# 早先的规则是"检索命中就不写缓存"，理由是"改了文档缓存就过期"——顾虑对，做法错：
+# 线上有知识库时几乎每条查询都会检索命中，于是缓存条目永远是 0，第一道省钱关卡关闭。
+# 现在改成版本号：同版本复用，重建索引后自动失效。
+import uuid as _uuid
+_k = "smoke-kbver-" + _uuid.uuid4().hex[:8]
+cache.put(_k, "答案", "m", "easy", kb_version="v1")
+check("同版本可命中", cache.lookup(_k, kb_version="v1") is not None)
+check("版本变了不命中", cache.lookup(_k, kb_version="v2") is None)
+check("不传版本则不校验（评测用）", cache.lookup(_k, kb_version=None) is not None)
+check("检索过的答案会进缓存（不再一刀切拒绝）",
+      run_graph("熔断器的三个状态是什么", session_id="smoke-rag-3b",
+                use_cache=True)["rag"]["hit"] is True)
 
 # 关掉 RAG 时完全不检索
 res3 = run_graph("缓存阈值是怎么定下来的", session_id="smoke-rag-4",

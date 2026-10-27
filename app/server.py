@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import cache, guard, memory, rag, store
+from . import cache, embedder, guard, memory, rag, store
 from .agent import run
 from .clients import local_breaker
 from .config import settings
@@ -145,8 +145,12 @@ def api_stats() -> dict:
 def api_cache_stats() -> dict:
     """语义缓存概况：条目数、累计命中、省下的 token 和成本。"""
     return {"enabled": settings.enable_cache,
-            "threshold": settings.cache_threshold,
+            "threshold": cache.effective_threshold(),
+            "embedder": embedder.name(),
+            "guard": settings.cache_guard,
             "ttl_days": settings.cache_ttl_days,
+            # 缓存与知识库版本绑定：重建索引后，基于旧文档的条目自动失效
+            "kb_version": rag.version(),
             **cache.stats()}
 
 

@@ -1,0 +1,89 @@
+{"q": "您好呀", "base": "你好", "label": 1, "kind": "paraphrase"}
+{"q": "hi，在吗", "base": "你好", "label": 1, "kind": "paraphrase"}
+{"q": "哈喽，打个招呼", "base": "你好", "label": 1, "kind": "paraphrase"}
+{"q": "早上好", "base": "你好", "label": 1, "kind": "paraphrase"}
+{"q": "你好，我想问一下怎么申请退款", "base": "你好", "label": 0, "kind": "near_miss"}
+{"q": "谢谢，但是我要申请退货", "base": "谢谢！", "label": 0, "kind": "near_miss"}
+{"q": "谢谢你", "base": "谢谢！", "label": 1, "kind": "paraphrase"}
+{"q": "多谢了", "base": "谢谢！", "label": 1, "kind": "paraphrase"}
+{"q": "感谢你的帮助", "base": "谢谢！", "label": 1, "kind": "paraphrase"}
+{"q": "辛苦了，谢啦", "base": "谢谢！", "label": 1, "kind": "paraphrase"}
+{"q": "介绍一下你自己", "base": "你是谁？", "label": 1, "kind": "paraphrase"}
+{"q": "你是什么模型", "base": "你是谁？", "label": 1, "kind": "paraphrase"}
+{"q": "你是谁开发的", "base": "你是谁？", "label": 1, "kind": "paraphrase"}
+{"q": "请做个自我介绍", "base": "你是谁？", "label": 1, "kind": "paraphrase"}
+{"q": "你是 OpenAI 的模型吗", "base": "你是谁？", "label": 0, "kind": "near_miss"}
+{"q": "你支持多长的上下文", "base": "你是谁？", "label": 0, "kind": "near_miss"}
+{"q": "帮我把「今天天气不错」翻成英语", "base": "把「今天天气不错」翻译成英文", "label": 1, "kind": "paraphrase"}
+{"q": "「今天天气不错」用英语怎么说", "base": "把「今天天气不错」翻译成英文", "label": 1, "kind": "paraphrase"}
+{"q": "翻译成英文：今天天气不错", "base": "把「今天天气不错」翻译成英文", "label": 1, "kind": "paraphrase"}
+{"q": "今天天气不错这句英文怎么写", "base": "把「今天天气不错」翻译成英文", "label": 1, "kind": "paraphrase"}
+{"q": "把「今天天气不好」翻译成英文", "base": "把「今天天气不错」翻译成英文", "label": 0, "kind": "near_miss"}
+{"q": "把「今天天气不错」翻译成日文", "base": "把「今天天气不错」翻译成英文", "label": 0, "kind": "near_miss"}
+{"q": "把「我明天下午三点开会」翻译成日文", "base": "把「我明天下午三点开会」翻译成日文", "label": 1, "kind": "exact"}
+{"q": "「我明天下午三点开会」用日语怎么说", "base": "把「我明天下午三点开会」翻译成日文", "label": 1, "kind": "paraphrase"}
+{"q": "帮我用日文说：我明天下午三点开会", "base": "把「我明天下午三点开会」翻译成日文", "label": 1, "kind": "paraphrase"}
+{"q": "我明天下午三点开会，这句翻成日语", "base": "把「我明天下午三点开会」翻译成日文", "label": 1, "kind": "paraphrase"}
+{"q": "把「我明天下午四点开会」翻译成日文", "base": "把「我明天下午三点开会」翻译成日文", "label": 0, "kind": "near_miss"}
+{"q": "把「我明天下午三点开会」翻译成韩文", "base": "把「我明天下午三点开会」翻译成日文", "label": 0, "kind": "near_miss"}
+{"q": "一公里是多少米", "base": "1 公里等于多少米", "label": 1, "kind": "paraphrase"}
+{"q": "1km 等于多少 m", "base": "1 公里等于多少米", "label": 1, "kind": "paraphrase"}
+{"q": "公里和米怎么换算", "base": "1 公里等于多少米", "label": 1, "kind": "paraphrase"}
+{"q": "一千米等于多少米", "base": "1 公里等于多少米", "label": 1, "kind": "paraphrase"}
+{"q": "1 英里等于多少米", "base": "1 公里等于多少米", "label": 0, "kind": "near_miss"}
+{"q": "1 公里等于多少尺", "base": "1 公里等于多少米", "label": 0, "kind": "near_miss"}
+{"q": "给我讲讲 REST API 这个概念", "base": "什么是 REST API？", "label": 1, "kind": "paraphrase"}
+{"q": "REST API 是什么意思", "base": "什么是 REST API？", "label": 1, "kind": "paraphrase"}
+{"q": "解释一下 REST API", "base": "什么是 REST API？", "label": 1, "kind": "paraphrase"}
+{"q": "REST API 到底是啥", "base": "什么是 REST API？", "label": 1, "kind": "paraphrase"}
+{"q": "什么是 SOAP API", "base": "什么是 REST API？", "label": 0, "kind": "near_miss"}
+{"q": "REST API 和 RPC 有什么区别", "base": "什么是 REST API？", "label": 0, "kind": "near_miss"}
+{"q": "404 状态码代表什么含义", "base": "HTTP 状态码 404 是什么意思", "label": 1, "kind": "paraphrase"}
+{"q": "HTTP 404 是什么意思", "base": "HTTP 状态码 404 是什么意思", "label": 1, "kind": "paraphrase"}
+{"q": "解释一下 404 状态码", "base": "HTTP 状态码 404 是什么意思", "label": 1, "kind": "paraphrase"}
+{"q": "访问网页的时候报 404 是怎么回事", "base": "HTTP 状态码 404 是什么意思", "label": 1, "kind": "paraphrase"}
+{"q": "HTTP 状态码 500 是什么意思", "base": "HTTP 状态码 404 是什么意思", "label": 0, "kind": "near_miss"}
+{"q": "HTTP 状态码 403 是什么意思", "base": "HTTP 状态码 404 是什么意思", "label": 0, "kind": "near_miss"}
+{"q": "HTTP 状态码 301 是什么意思", "base": "HTTP 状态码 404 是什么意思", "label": 0, "kind": "near_miss"}
+{"q": "404 和 500 有什么区别", "base": "HTTP 状态码 404 是什么意思", "label": 0, "kind": "near_miss"}
+{"q": "把「明天我不来了」改成正式一点的表达", "base": "把这段话改成更正式的语气：明天我不来了", "label": 1, "kind": "paraphrase"}
+{"q": "帮我书面化这句话：明天我不来了", "base": "把这段话改成更正式的语气：明天我不来了", "label": 1, "kind": "paraphrase"}
+{"q": "这句太随意了，改正式一点：明天我不来了", "base": "把这段话改成更正式的语气：明天我不来了", "label": 1, "kind": "paraphrase"}
+{"q": "把这段话改成更口语的语气：明天我不来了", "base": "把这段话改成更正式的语气：明天我不来了", "label": 0, "kind": "near_miss"}
+{"q": "把这段话改成更正式的语气：后天我不来了", "base": "把这段话改成更正式的语气：明天我不来了", "label": 0, "kind": "near_miss"}
+{"q": "把 hello world 转成全大写", "base": "帮我把下面这行改成全大写：hello world", "label": 1, "kind": "paraphrase"}
+{"q": "hello world 大写怎么拼", "base": "帮我把下面这行改成全大写：hello world", "label": 1, "kind": "paraphrase"}
+{"q": "这句话全大写是什么：hello world", "base": "帮我把下面这行改成全大写：hello world", "label": 1, "kind": "paraphrase"}
+{"q": "帮我把下面这行改成全小写：HELLO WORLD", "base": "帮我把下面这行改成全大写：hello world", "label": 0, "kind": "near_miss"}
+{"q": "帮我把下面这行改成全大写：hello python", "base": "帮我把下面这行改成全大写：hello world", "label": 0, "kind": "near_miss"}
+{"q": "解释一下 CAP 定理说的是什么", "base": "什么是 CAP 定理", "label": 1, "kind": "paraphrase"}
+{"q": "CAP 定理是什么意思", "base": "什么是 CAP 定理", "label": 1, "kind": "paraphrase"}
+{"q": "讲讲 CAP 理论", "base": "什么是 CAP 定理", "label": 1, "kind": "paraphrase"}
+{"q": "CAP 定理到底是啥", "base": "什么是 CAP 定理", "label": 1, "kind": "paraphrase"}
+{"q": "什么是 BASE 理论", "base": "什么是 CAP 定理", "label": 0, "kind": "near_miss"}
+{"q": "CAP 定理和 ACID 有什么区别", "base": "什么是 CAP 定理", "label": 0, "kind": "near_miss"}
+{"q": "下午 3 点 15 分用 24 小时制怎么表示", "base": "把 3 点 15 分转换成 24 小时制的数字写法", "label": 1, "kind": "paraphrase"}
+{"q": "3:15 PM 换成 24 小时制是几点", "base": "把 3 点 15 分转换成 24 小时制的数字写法", "label": 1, "kind": "paraphrase"}
+{"q": "3 点 15 分转成 24 小时制怎么写", "base": "把 3 点 15 分转换成 24 小时制的数字写法", "label": 1, "kind": "paraphrase"}
+{"q": "把 3 点 15 分转换成 12 小时制", "base": "把 3 点 15 分转换成 24 小时制的数字写法", "label": 0, "kind": "near_miss"}
+{"q": "把 3 点 45 分转换成 24 小时制的数字写法", "base": "把 3 点 15 分转换成 24 小时制的数字写法", "label": 0, "kind": "near_miss"}
+{"q": "简单说说 TCP 跟 UDP 差在哪", "base": "用一句话说明 TCP 和 UDP 的主要区别", "label": 1, "kind": "paraphrase"}
+{"q": "TCP 和 UDP 的区别是什么，一句话", "base": "用一句话说明 TCP 和 UDP 的主要区别", "label": 1, "kind": "paraphrase"}
+{"q": "一句话讲清 TCP 与 UDP 的差异", "base": "用一句话说明 TCP 和 UDP 的主要区别", "label": 1, "kind": "paraphrase"}
+{"q": "用一句话说明 TCP 和 UDP 的相同点", "base": "用一句话说明 TCP 和 UDP 的主要区别", "label": 0, "kind": "near_miss"}
+{"q": "用一句话说明 TCP 和 HTTP 的主要区别", "base": "用一句话说明 TCP 和 UDP 的主要区别", "label": 0, "kind": "near_miss"}
+{"q": "快速排序的时间复杂度是多少", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "怎么用 Python 读一个特别大的文件", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "Redis 和 Memcached 有什么区别", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "什么是 Docker", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "git rebase 和 merge 该用哪个", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "显存不够怎么办", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "解释一下梯度下降", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "MySQL 索引为什么用 B+ 树", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "如何设计一个短链接系统", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "K8s 里的 Pod 是什么", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "什么是向量数据库", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "Python 的 GIL 是什么", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "http 和 https 的区别", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "JWT 和 Session 怎么选", "base": "", "label": 0, "kind": "unrelated"}
+{"q": "什么是消息队列", "base": "", "label": 0, "kind": "unrelated"}

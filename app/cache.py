@@ -6,14 +6,25 @@
 
 设计取舍（面试可讲的四点）：
 
-1. 为什么用"字符 n-gram 向量"而不是真 embedding 模型？
-   为缓存再调一次 embedding API 就本末倒置——缓存的意义是省钱，查询本身必须
-   零成本零网络。n-gram hashing 向量纯 Python 计算，毫秒级。
-   实测边界（阈值 0.45 据此校准）：中长句的同义改写余弦 ≥0.5 能命中，无关问题
-   ≤0.3 不会误命中；但短句寒暄（"你好" vs "您好啊"只有 0.1）和换说法的概念问句
-   （"404 是什么意思" vs "404 代表什么"）召回弱——这是 n-gram 的已知边界，
-   好在寒暄本来就 0 成本走规则路由，真正的语义召回交给 embed() 的后续实现
-   （换 BGE 等本地 embedding 模型只改这一个函数，上层不动）。
+1. 为什么现在用本地小模型，而不是当初的字符 n-gram？
+   一开始的理由是"为缓存再调一次 embedding API 就本末倒置"——这半句是对的，
+   但结论错了：**零的是 API 成本，不是零模型**。本地跑 91MB 的 BGE-small-zh
+   （ONNX + CPU），一样一分钱不花，单条十几毫秒。
+
+   而 n-gram 的代价是硬的，89 条标注集实测（docs/evidence/threshold_sweep.md，脚本
+   tools/threshold_sweep.py 可复现）：
+       该命中的同义改问法  中位相似度 0.437   「您好呀」vs「你好」只有 0.11
+       必须拒绝的近似问题  中位相似度 0.746   「3点45」vs「3点15」高达 0.906
+   分数与"该不该复用"是反着的。扫遍 0.20~0.95 全区间，precision 最高 57%；
+   0.45 时命中 41 次里 18 次答错，整体答对率 51.7%，跟抛硬币差不多。
+   根因：n-gram 量的是字面重合，而判断该不该复用看的是语义——一个字的变化
+   （3→4、大写→小写、404→403）能翻转答案，整句换个说法却是同一件事。
+
+   所以阈值不是"调得不准"，是尺子不对。换刻度救不了，只能换尺子。
+   这也是 GPTCache / MeanCache / vCache 这些工作无一例外都建在真 embedding 上的原因。
+
+   保留 n-gram 作为降级路径：部署包不携带 91MB 模型时自动退回，
+   主流程不因为缓存组件装不上而挂掉。切换逻辑在 app/embedder.py。
 
 2. 为什么只缓存"首轮独立问题"？
    多轮问题（"继续""为什么"）依赖会话上下文，同一句话在不同会话里答案不同，
@@ -27,56 +38,37 @@
    缓存条目量级是几百到几千，256 维向量两两点积一次 <10ms，SQLite 单表就够。
    等量级上万再上 FAISS/sqlite-vec——"判断成本要配得上判断价值"的又一次复用。
 
-失效策略：TTL（默认 7 天）+ 命中计数。长期没人命中的条目自然过期，
-不需要人工维护。
+失效策略（三条，各管一类"为什么不能再复用"）：
+    1. TTL（默认 7 天）：时间会让答案过时（"今天天气"）
+    2. 向量后端切换：维度不同不能比（见 embed_model 列）
+    3. 知识库版本变化：答案依赖检索内容，文档改了就不成立（见 kb_version 列）
+第 3 条原来是用"检索命中过就一律不写缓存"实现的，代价是只要有知识库缓存就永不工作。
+改成版本号以后，粒度和收益才对齐。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
 
+from . import cacheguard, embedder
 from .config import settings
 from .dbutil import with_retry
 
-# n-gram 混合权重：trigram 区分度高为主，uni/bigram 保证短句也能提出特征
-_NGRAM_WEIGHTS = ((1, 0.3), (2, 0.5), (3, 1.0))
-_EMB_DIM = 256
-
 _WS_RE = re.compile(r"\s+")
+
+# 向量化统一走 app/embedder.py：缓存和评测必须用同一把尺子，否则阈值不可复用。
+# 保留 embed 这个名字是为了既有调用方（tools/threshold_sweep.py 等）不用改。
+embed = embedder.embed
 
 
 def _normalize(text: str) -> str:
     """查询归一化：去空白、转小写。让"你好"和"你 好"落在同一个 hash 上。"""
     return _WS_RE.sub("", text).lower()
-
-
-def embed(text: str) -> list[float]:
-    """把文本变成 256 维归一化向量（hashing trick，零依赖零网络）。
-
-    每个字符 n-gram hash 到固定维度上累加词频（乘权重），最后 L2 归一化。
-    归一化之后两向量的内积就是余弦相似度，不用再除两个模长。
-    """
-    text = _normalize(text)
-    vec = [0.0] * _EMB_DIM
-    if not text:
-        return vec
-    for n, weight in _NGRAM_WEIGHTS:
-        if len(text) < n:
-            continue
-        for i in range(len(text) - n + 1):
-            gram = text[i:i + n]
-            h = int.from_bytes(hashlib.md5(gram.encode()).digest()[:4], "big")
-            vec[h % _EMB_DIM] += weight
-    norm = math.sqrt(sum(v * v for v in vec))
-    if norm == 0:
-        return vec
-    return [v / norm for v in vec]
 
 
 def _hash_query(text: str) -> str:
@@ -88,6 +80,18 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+# 阈值与后端强绑定：两个后端的分数分布完全不同，数值不可互相搬。
+# bge 0.60 是实测拐点（precision 100%，错误率 0），ngram 0.35 是 F0.5 最优点。
+_AUTO_THRESHOLD = {"bge": 0.60, "ngram": 0.35}
+
+
+def effective_threshold() -> float:
+    """实际生效的分数线：CACHE_THRESHOLD>0 用手动值，否则按当前后端取标定值。"""
+    if settings.cache_threshold > 0:
+        return settings.cache_threshold
+    return _AUTO_THRESHOLD.get(embedder.active(), 0.45)
+
+
 def init() -> None:
     """建表（幂等）。与记账同库：缓存和成本统计是同一个故事的两半。"""
     conn = sqlite3.connect(settings.db_path, timeout=10)
@@ -96,7 +100,8 @@ def init() -> None:
             "CREATE TABLE IF NOT EXISTS semantic_cache ("
             " query_hash TEXT PRIMARY KEY,"     # 归一化后 md5，完全一致的快速通道
             " query_text TEXT NOT NULL,"        # 原始问题（调试/展示用）
-            " embedding TEXT NOT NULL,"         # 256 维向量，JSON 数组
+            " embedding TEXT NOT NULL,"         # 向量，JSON 数组（维度随后端变）
+            " embed_model TEXT NOT NULL DEFAULT 'ngram-256',"  # 哪把尺子量的
             " answer TEXT NOT NULL,"
             " model TEXT NOT NULL,"
             " difficulty TEXT NOT NULL,"
@@ -104,39 +109,65 @@ def init() -> None:
             " tokens_out INTEGER NOT NULL DEFAULT 0,"
             " cost_cny REAL NOT NULL DEFAULT 0,"
             " hits INTEGER NOT NULL DEFAULT 0,"
+            " kb_version TEXT NOT NULL DEFAULT '',"   # 生成答案时的知识库版本
             " created_at TEXT NOT NULL,"
             " updated_at TEXT NOT NULL)"
         )
+        # 老库补列：换后端才有意义，缺了它就只能整表重建
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_cache)")}
+        if "embed_model" not in cols:
+            conn.execute("ALTER TABLE semantic_cache ADD COLUMN"
+                         " embed_model TEXT NOT NULL DEFAULT 'ngram-256'")
+        if "kb_version" not in cols:
+            conn.execute("ALTER TABLE semantic_cache ADD COLUMN"
+                         " kb_version TEXT NOT NULL DEFAULT ''")
     conn.close()
 
 
 @with_retry
-def lookup(query: str, threshold: float | None = None) -> dict | None:
+def lookup(query: str, threshold: float | None = None,
+           kb_version: str | None = None) -> dict | None:
     """查缓存。返回 {"answer","model","difficulty","score","hits"} 或 None。
 
     两段式：先 hash 精确匹配（O(1)），再相似度线性扫描（量级小，毫秒级）。
     过期条目（超过 TTL）一律不返回——答案可能已经过时，比如"今天天气"。
+
+    kb_version：当前知识库版本（rag.version()）。传了就只认同一版本下生成的条目，
+    传 None 表示不校验（评测/实验用——它们要的是纯粹的相似度行为）。
     """
     if not query or not settings.enable_cache:
         return None
-    threshold = threshold if threshold is not None else settings.cache_threshold
+    threshold = threshold if threshold is not None else effective_threshold()
     q_hash = _hash_query(query)
     now = time.time()
 
     try:
         conn = sqlite3.connect(settings.db_path, timeout=10)
         rows = conn.execute(
-            "SELECT query_hash, embedding, answer, model, difficulty,"
-            " hits, updated_at FROM semantic_cache"
+            "SELECT query_hash, embedding, query_text, answer, model, difficulty,"
+            " hits, updated_at, embed_model, kb_version FROM semantic_cache"
         ).fetchall()
     except sqlite3.OperationalError:   # 表还没建
         return None
     finally:
         conn.close()
 
+    cur_model = embedder.name()
     ttl = settings.cache_ttl_days * 86400
     best_score, best_row, best_hash = 0.0, None, ""
-    for r_hash, emb_json, answer, model, difficulty, hits, updated_at in rows:
+    guarded_out = ""
+    for (r_hash, emb_json, query_text, answer, model, difficulty,
+         hits, updated_at, emb_model, kb_ver) in rows:
+        # 换过向量后端：256 维和 512 维算出来的余弦毫无意义，整条跳过。
+        # 代价是切换后端后缓存相当于清空——这是正确的，宁可重算不可答错。
+        if emb_model != cur_model:
+            continue
+
+        # 知识库变过：这条答案是按旧文档生成的，可能已经不成立，整条跳过。
+        # 空版本表示"这份答案没用到检索"，不受文档更新影响，照常可用。
+        if kb_version is not None and kb_ver and kb_ver != kb_version:
+            continue
+
         # TTL 统一生效（含精确匹配）。命中过的条目 updated_at 每次刷新，
         # 正常不会过期；hits=0 且超期的是死条目，直接跳过。
         try:
@@ -147,13 +178,21 @@ def lookup(query: str, threshold: float | None = None) -> dict | None:
             continue
 
         if r_hash == q_hash:
-            # 完全一致：相似度记 1.0，必然最优先
+            # 完全一致：字面都一模一样，不需要再过守卫
             best_score, best_row, best_hash = 1.0, (answer, model, difficulty, hits), r_hash
             break
 
         score = _cosine(embed(query), json.loads(emb_json))
-        if score > best_score:
-            best_score, best_row, best_hash = score, (answer, model, difficulty, hits), r_hash
+        if score <= best_score:
+            continue
+        # 过了分数线还不算：向量只说"讲的是同一件事"，不说"参数也一样"。
+        # 3点15/3点45 余弦能到 0.97，靠这一步拦。
+        if settings.cache_guard:
+            ok, why = cacheguard.check(query, query_text)
+            if not ok:
+                guarded_out = why
+                continue
+        best_score, best_row, best_hash = score, (answer, model, difficulty, hits), r_hash
 
     if best_row is None or best_score < threshold:
         return None
@@ -169,16 +208,20 @@ def lookup(query: str, threshold: float | None = None) -> dict | None:
         )
     conn.close()
     return {"answer": answer, "model": model, "difficulty": difficulty,
-            "score": best_score, "hits": hits + 1}
+            "score": best_score, "hits": hits + 1, "guard": "pass" if guarded_out else "",
+            "guard_blocked": guarded_out}
 
 
 @with_retry
 def put(query: str, answer: str, model: str, difficulty: str,
-        tokens_in: int = 0, tokens_out: int = 0, cost: float = 0.0) -> bool:
+        tokens_in: int = 0, tokens_out: int = 0, cost: float = 0.0,
+        kb_version: str = "") -> bool:
     """写入缓存。完全相同的查询已存在时不覆盖（答案没变，没必要）。
 
     表不存在时自动建表重试一次——调用方（如冒烟脚本）忘了 init 也不至于崩，
     主流程不能被缓存这种"锦上添花"的组件阻塞。
+
+    kb_version：生成这份答案时的知识库版本。答案没用到检索时传空串。
     """
     if not query or not answer:
         return False
@@ -190,11 +233,14 @@ def put(query: str, answer: str, model: str, difficulty: str,
             with conn:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO semantic_cache"
-                    " (query_hash, query_text, embedding, answer, model, difficulty,"
-                    "  tokens_in, tokens_out, cost_cny, hits, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,0,?,?)",
-                    (q_hash, query[:500], json.dumps(embed(query)), answer, model,
-                     difficulty, tokens_in, tokens_out, round(cost, 6), now, now),
+                    " (query_hash, query_text, embedding, embed_model, answer, model,"
+                    "  difficulty, tokens_in, tokens_out, cost_cny, hits,"
+                    "  kb_version, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
+                    (q_hash, query[:500], json.dumps(embed(query)),
+                     embedder.name(), answer, model,
+                     difficulty, tokens_in, tokens_out, round(cost, 6),
+                     kb_version, now, now),
                 )
             conn.close()
             return cur.rowcount > 0

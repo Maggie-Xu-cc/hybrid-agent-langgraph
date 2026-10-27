@@ -146,10 +146,13 @@ def cache_lookup_node(state: AgentState) -> dict:
     命中时直接构造 answer/route 等字段，条件边把流程引向 bookkeep——
     bookkeep 仍走原路径构造 result，保证缓存命中的返回结构与普通请求完全一致。
     查找成本 ≈ 一次 256 维向量线性扫描，毫秒级，0 token。
+
+    传 kb_version 是为了让"答案依赖文档"这个前提可校验：知识库没变就照样复用，
+    重建过索引就自动失效。原来的做法是一律不缓存检索过的答案，结果缓存几乎不工作。
     """
     if not state.get("use_cache", settings.enable_cache):
         return {"cache_hit": False}
-    hit = cache.lookup(state["query"])
+    hit = cache.lookup(state["query"], kb_version=rag.version())
     if not hit:
         return {"cache_hit": False}
     return {
@@ -348,12 +351,18 @@ def bookkeep_node(state: AgentState) -> dict:
     # hard 默认不存（质量敏感+重复率低），CACHE_CACHE_HARD=1 可打开。
     # 注意不排除 degraded：降级只是换了provider（本地挂了走云端），答案本身是好的；
     # 若排除，本地模型一挂缓存就彻底不工作——恰是最需要省钱的时候失效，不合理。
+    #
+    # 关于"检索过的答案能不能缓存"：能，但要绑定知识库版本。
+    # 早先的做法是 not rag_hit —— 只要检索命中就不写，理由"文档改了答案就过期"。
+    # 这个顾虑成立，但做法把粒度搞错了：线上有知识库时几乎每条查询都会检索命中，
+    # 于是缓存条目永远是 0，第一道省钱关卡形同关闭（实测线上 entries=0 就是这个原因）。
+    # 现在写进 kb_version，命中时比对版本：文档没改照样复用，重建过索引自动失效。
     pre_history = state.get("history") or []
+    rag_hit = bool(state.get("rag_hit"))
     cache_writable = (
         state.get("use_cache", settings.enable_cache)
         and not state.get("cache_hit")
         and not pre_history
-        and not state.get("rag_hit")   # 答案依赖知识库内容：改了文档缓存就过期，不能复用
         and bool(state.get("answer"))
         and (route["difficulty"] == "easy" or settings.cache_cache_hard)
     )
@@ -413,6 +422,8 @@ def bookkeep_node(state: AgentState) -> dict:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost=cost,
+            # 用过检索就记下当前知识库版本，没用过留空（不受文档更新影响）
+            kb_version=rag.version() if rag_hit else "",
         )
 
     facts = state.get("facts") or {}

@@ -28,7 +28,7 @@ os.environ["CHECKPOINT_DB"] = str(
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app import cache, store            # noqa: E402
+from app import cache, cacheguard, embedder, store   # noqa: E402
 from app.config import settings         # noqa: E402
 from app.graph import run_graph         # noqa: E402
 
@@ -52,7 +52,7 @@ print("\n== 1. embed 向量 ==")
 v1 = cache.embed("你好")
 v2 = cache.embed("你好")
 v3 = cache.embed("请问如何学习深度学习并调参")
-check("维度 = 256", len(v1) == 256)
+check(f"维度 = {embedder.dim()}（后端 {embedder.name()}）", len(v1) == embedder.dim())
 check("模长归一化 ≈ 1", abs(norm(v1) - 1.0) < 0.01, f"norm={norm(v1):.4f}")
 check("确定性：同文本同向量", v1 == v2)
 sim_hi = cache._cosine(cache.embed("把「我明天下午三点开会」翻译成日文"),
@@ -63,9 +63,12 @@ sim_greet = cache._cosine(cache.embed("你好"), cache.embed("您好啊"))
 check("同义改写相似度高（中长句）", sim_hi > 0.5, f"cos={sim_hi:.3f}")
 check("无关问题相似度低", sim_far < 0.3, f"cos={sim_far:.3f}")
 check("区分度：同义 > 无关", sim_hi > sim_far)
-# 已知边界（写进测试防止将来无感退化）：n-gram 对短句寒暄召回弱
-check("短句寒暄召回弱是已知边界（不误报为 bug）", 0.0 <= sim_greet < 0.5,
-      f"cos={sim_greet:.3f}")
+# 这条是换尺子的直接证据：n-gram 下「您好啊」只有 0.1，BGE 下 0.82
+if embedder.active() == "bge":
+    check("同义寒暄能召回（BGE 修掉了 n-gram 的边界）", sim_greet > 0.7,
+          f"cos={sim_greet:.3f}")
+else:
+    check("短句寒暄召回弱是 n-gram 的已知边界", sim_greet < 0.5, f"cos={sim_greet:.3f}")
 
 print("\n== 2. put / lookup 基本行为 ==")
 ok = cache.put("今天上海天气怎么样", "（mock/本地）回答A", "Qwen2.5-7B-AWQ", "easy",
@@ -149,6 +152,32 @@ conn.close()
 n_purged = cache.purge_expired()
 check("过期未命中条目被清掉", n_purged > 0, f"purged={n_purged}")
 check("清理后表为空", cache.stats()["entries"] == 0)
+
+# ----------------------------------------------------------------
+print("\n== 8. 载荷守卫（向量看不见的那一层）==")
+# 这些句子的余弦都在 0.9 以上，光靠阈值必然误命中；守卫负责拦住
+cases_bad = [
+    ("把 3 点 45 分转换成 24 小时制", "把 3 点 15 分转换成 24 小时制", "数字"),
+    ("HTTP 状态码 403 是什么意思", "HTTP 状态码 404 是什么意思", "状态码"),
+    ("把「今天天气不好」翻译成英文", "把「今天天气不错」翻译成英文", "褒贬"),
+    ("改成全小写：HELLO WORLD", "改成全大写：hello world", "大小写"),
+    ("把这段话改成更口语的语气", "把这段话改成更正式的语气", "语体"),
+    ("用一句话说明 TCP 和 UDP 的相同点", "用一句话说明 TCP 和 UDP 的主要区别", "对比维度"),
+]
+for q, c, tag in cases_bad:
+    ok, why = cacheguard.check(q, c)
+    check(f"拦住：{tag}", not ok, why)
+
+cases_ok = [
+    ("您好呀", "你好", "寒暄同义"),
+    ("一公里是多少米", "1 公里等于多少米", "中文数字"),
+    ("解释一下 404 状态码", "HTTP 状态码 404 是什么意思", "省略缩写"),
+    ("这句太随意了，改正式一点：明天我不来了", "把这段话改成更正式的语气：明天我不来了",
+     "同时提到现状与目标"),
+]
+for q, c, tag in cases_ok:
+    ok, why = cacheguard.check(q, c)
+    check(f"放行：{tag}", ok, why)
 
 # ----------------------------------------------------------------
 print(f"\n结果：{len(PASS)} 通过，{len(FAIL)} 失败")
