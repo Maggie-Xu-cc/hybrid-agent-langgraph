@@ -1,5 +1,6 @@
 """运行记录与统计（SQLite，零依赖）。"""
 
+import json
 import sqlite3
 import time
 
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS runs (
     escalated INTEGER DEFAULT 0,             -- 是否触发升级重答
     session_id TEXT DEFAULT '',              -- 哪个会话产生的：页面按会话分开显示
     guard_blocked TEXT DEFAULT '',           -- 门卫拒绝原因（空 = 没被拦）
-    cache_score REAL DEFAULT 0               -- 本轮最高缓存相似度（含被拦下的候选）
+    cache_score REAL DEFAULT 0,              -- 本轮最高缓存相似度（含被拦下的候选）
+    tool_steps TEXT DEFAULT ''               -- 工具调用轨迹（JSON 数组，空 = 没动手）
 );
 """
 
@@ -32,6 +34,7 @@ _MIGRATIONS = (
     ("session_id", "TEXT DEFAULT ''"),
     ("guard_blocked", "TEXT DEFAULT ''"),
     ("cache_score", "REAL DEFAULT 0"),
+    ("tool_steps", "TEXT DEFAULT ''"),
 )
 
 
@@ -73,13 +76,14 @@ def record(
     session_id: str = "",
     guard_blocked: str = "",
     cache_score: float = 0.0,
+    tool_steps: list | None = None,
 ) -> None:
     with _conn() as conn:
         conn.execute(
             "INSERT INTO runs (ts, query, route, reason, decided_by, model, latency_ms,"
             " tokens_in, tokens_out, cost_cny, baseline_cost_cny, escalated,"
-            " session_id, guard_blocked, cache_score)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " session_id, guard_blocked, cache_score, tool_steps)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
                 query[:500],
@@ -96,6 +100,7 @@ def record(
                 session_id,
                 guard_blocked,
                 round(cache_score or 0, 4),
+                json.dumps(tool_steps, ensure_ascii=False) if tool_steps else "",
             ),
         )
 
@@ -126,6 +131,14 @@ def stats() -> dict:
         }
         # 分层追踪（tracing）：每个环节接了多少请求、平均延迟、花了多少钱。
         # decided_by 即请求走过的"最后一层"：cache=缓存命中, rule/model/default=路由结果
+        # 工具调用统计：有多少轮动过手、平均几步。
+        # 这两个数比"工具总数"有用得多——它回答"Agent 真的在用手，还是只写在 README 里"
+        tool_row = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN tool_steps != '' THEN 1 ELSE 0 END),0) uses,"
+            " COALESCE(SUM(json_array_length(CASE WHEN json_valid(tool_steps)"
+            " AND tool_steps != '' THEN tool_steps ELSE '[]' END)),0) steps"
+            " FROM runs"
+        ).fetchone()
         by_layer_raw = conn.execute(
             "SELECT decided_by layer, COUNT(*) n, COALESCE(AVG(latency_ms),0) lat,"
             " COALESCE(SUM(cost_cny),0) cost FROM runs GROUP BY decided_by"
@@ -157,6 +170,8 @@ def stats() -> dict:
         "cache_hit_ratio": round(by_layer.get("cache", {}).get("count", 0) / total, 4)
         if total else 0.0,
         "guard_blocks": int(row["guarded"] or 0),
+        "tool_runs": int(tool_row["uses"] or 0),
+        "tool_steps_total": int(tool_row["steps"] or 0),
     }
 
 # 给演示页面底部“最近 10 条调用记录”
@@ -164,8 +179,8 @@ def recent(limit: int = 10, session_id: str | None = None) -> list[dict]:
     """最近请求。传 session_id 就只返回该会话的——页面按会话分开显示，
     全局混在一起既看不懂，也会让人以为别人的对话是自己的。"""
     sql = ("SELECT ts, query, route, decided_by, latency_ms, cost_cny,"
-           " baseline_cost_cny, escalated, session_id, guard_blocked, cache_score"
-           " FROM runs")
+           " baseline_cost_cny, escalated, session_id, guard_blocked, cache_score,"
+           " tool_steps FROM runs")
     args: list = []
     if session_id is not None:
         sql += " WHERE session_id = ?"
@@ -174,4 +189,14 @@ def recent(limit: int = 10, session_id: str | None = None) -> list[dict]:
     args.append(limit)
     with _conn() as conn:
         rows = conn.execute(sql, args).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        # 轨迹以 JSON 存 TEXT：页面和接口都用数组更好使，这里统一解一次。
+        # 解析失败不抛错——旧库里可能是空串或半截 JSON，不该让整页打不开。
+        try:
+            d["tool_steps"] = json.loads(d.get("tool_steps") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            d["tool_steps"] = []
+        out.append(d)
+    return out

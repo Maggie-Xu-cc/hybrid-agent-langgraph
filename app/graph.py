@@ -44,11 +44,11 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from . import cache, context, memory, rag, store
+from . import cache, context, memory, rag, react, store
 from .dbutil import with_retry
 from .clients import ProviderError, call_cloud, call_local
 from .config import settings
-from .router import Route, decide
+from .router import Route, decide, needs_tools
 
 SYSTEM = (
     "你是一个严谨的助手。用中文回答，直接给结论，不要复述问题。"
@@ -111,6 +111,11 @@ class AgentState(TypedDict, total=False):
     rag_hit: bool  # 本轮是否检索到资料
     rag_stats: dict  # 检索统计（条数、耗时、来源、最高分）
     use_rag: bool  # 本轮是否启用检索（评测/对照实验可关）
+    use_tools: bool  # 本轮是否走工具循环（route 节点判定的）
+    tools_reason: str  # 为什么判定要用工具（页面上要能解释）
+    tool_steps: list  # 工具调用轨迹（给页面和记账用）
+    tool_calls: int  # 实际执行了几次工具（不含重复调用）
+    tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error
     started: float
     result: dict
 
@@ -216,6 +221,12 @@ def retrieve_node(state: AgentState) -> dict:
     started = time.perf_counter()
     if not state.get("use_rag", settings.enable_rag):
         return {"rag_chunks": [], "rag_hit": False, "rag_stats": {"n": 0, "enabled": False}}
+    # 要动手的请求不预先检索：工具里有 search_docs，它按需检索。
+    # 两边都注入等于同一批文档进两次上下文——实测多花约 1000 token，
+    # 而且模型会分不清"这两段资料哪个是这一轮的"，答案反而更容易串。
+    if needs_tools(state.get("query") or "")[0] and settings.enable_tools:
+        return {"rag_chunks": [], "rag_hit": False,
+                "rag_stats": {"n": 0, "enabled": True, "skipped": "工具路径自带检索"}}
     try:
         chunks = rag.search(state["query"])
     except Exception as exc:   # noqa: BLE001 — 检索挂了也不能让整条请求挂
@@ -249,6 +260,9 @@ def route_node(state: AgentState) -> dict:
 
     messages, ctx_stats = _build_messages({**state, "query": query}, query)
 
+    want_tools, why = needs_tools(query)
+    want_tools = want_tools and settings.enable_tools
+
     return {
         "query": query,
         "started": started,
@@ -260,6 +274,13 @@ def route_node(state: AgentState) -> dict:
             "tokens_in": route.tokens_in,
             "tokens_out": route.tokens_out,
         },
+        # 路由和"要不要动手"是两件事：一个决定用多贵的模型，一个决定要不要调工具。
+        # 合成一个字段会互相污染（"难"不代表要查库，"简单"也可能要算一下）。
+        "use_tools": want_tools,
+        "tools_reason": why,
+        "tool_steps": [],
+        "tool_calls": 0,
+        "tool_stop": "",
         "messages": messages,
         "ctx_stats": ctx_stats,
         "local_in": route.tokens_in,
@@ -269,6 +290,45 @@ def route_node(state: AgentState) -> dict:
         "escalated": False,
         "degraded": False,
     }
+
+
+def tool_agent_node(state: AgentState) -> dict:
+    """工具循环节点：ReAct（想→动手→看结果→再想）。
+
+    为什么跳过后面的 self_check/escalate：
+    那两步是为"模型没把握"设计的——让它换更强的模型重答一次。而这里的答案
+    建立在**工具实际返回的事实**上，重答一次只会把刚查到的东西丢掉。
+    工具链路的质量问题应该在循环内部解决（收口那次调用），不是靠外部重试。
+    """
+    messages = state["messages"]
+    res = react.run(messages)
+
+    cloud_in = res.tokens_in
+    cloud_out = res.tokens_out
+    update: AgentState = {
+        "tool_steps": res.brief_steps(),
+        "tool_calls": sum(1 for s in res.steps if not s.repeat and s.name != "(模型)"),
+        "tool_stop": res.stop,
+    }
+
+    if not res.answer:
+        # 工具链路失败（模型挂了/没有 openai 包）：退回普通云端作答。
+        # 用户要的是答案，不是"工具链路出错了"——降级要自己吃掉。
+        try:
+            answer, tin, tout = call_cloud(messages)
+            update.update(answer=answer, model_used=settings.cloud_model,
+                          cloud_in=cloud_in + tin, cloud_out=cloud_out + tout,
+                          degraded=True, tool_stop=res.stop or "error")
+            return update
+        except ProviderError:
+            return {**update, "answer": "工具调用没能完成，模型也不可用。请稍后再试。",
+                    "model_used": "tool-error", "cloud_in": cloud_in,
+                    "cloud_out": cloud_out, "degraded": True,
+                    "tool_stop": res.stop or "error"}
+
+    update.update(answer=res.answer, model_used=f"{settings.cloud_model} +tools",
+                  cloud_in=cloud_in, cloud_out=cloud_out, degraded=False)
+    return update
 
 
 def local_answer_node(state: AgentState) -> dict:
@@ -387,6 +447,10 @@ def bookkeep_node(state: AgentState) -> dict:
         and not state.get("cache_hit")
         and not pre_history
         and bool(state.get("answer"))
+        # 调过工具的答案不写缓存：它的正确性依赖"当时那一次"外部状态
+        # （数据库有几行、网页写了什么），这些变化没有版本号可比。
+        # kb_version 能管"文档改过"，管不了"数据库多了一条记录"。
+        and not state.get("tool_steps")
         and (route["difficulty"] == "easy" or settings.cache_cache_hard)
     )
 
@@ -448,6 +512,8 @@ def bookkeep_node(state: AgentState) -> dict:
         cost=cost,
         baseline_cost=baseline,
         escalated=state.get("escalated", False),
+        # 工具轨迹落库：页面刷新后要能重放"这一轮调了什么、结果是什么"
+        tool_steps=state.get("tool_steps") or [],
     )
 
     if cache_writable:
@@ -495,6 +561,15 @@ def bookkeep_node(state: AgentState) -> dict:
             "summarized_now": summarized,
             "ctx_tokens": state.get("ctx_stats") or {},
         },
+        # 工具调用的可观测性：这一轮动了几次手、每步的参数/结果/耗时、为什么停
+        "tools": {
+            "enabled": settings.enable_tools,
+            "used": bool(state.get("tool_steps")),
+            "reason": state.get("tools_reason") or "",
+            "calls": state.get("tool_calls") or 0,
+            "stop": state.get("tool_stop") or "",
+            "steps": state.get("tool_steps") or [],
+        },
         # 检索的可观测性：命了几段、来自哪个文档、最高分多少、耗时
         "rag": {
             **(state.get("rag_stats") or {"enabled": False, "n": 0}),
@@ -532,6 +607,8 @@ def after_cache(state: AgentState) -> str:
 
 
 def after_route(state: AgentState) -> str:
+    if state.get("use_tools"):
+        return "tools"
     return state["route"]["difficulty"]
 
 
@@ -553,6 +630,7 @@ def build_graph(checkpointer=None):
     g.add_node("route", route_node)
     g.add_node("local_answer", local_answer_node)
     g.add_node("cloud_answer", cloud_answer_node)
+    g.add_node("tool_agent", tool_agent_node)
     g.add_node("self_check", self_check_node)
     g.add_node("escalate", escalate_node)
     g.add_node("bookkeep", bookkeep_node)
@@ -565,8 +643,11 @@ def build_graph(checkpointer=None):
     })
     g.add_edge("retrieve", "route")
     g.add_conditional_edges("route", after_route, {
-        "easy": "local_answer", "hard": "cloud_answer",
+        "easy": "local_answer", "hard": "cloud_answer", "tools": "tool_agent",
     })
+    # 工具链路直接进 bookkeep：不走 self_check（那是给"没把握"用的重答机制，
+    # 会把工具查到的实事丢掉），也不进缓存（见 bookkeep 里的注释）
+    g.add_edge("tool_agent", "bookkeep")
     g.add_conditional_edges("local_answer", after_local, {
         "check": "self_check", "done": "bookkeep",
     })

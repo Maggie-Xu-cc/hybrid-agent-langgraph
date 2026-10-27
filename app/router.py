@@ -131,3 +131,32 @@ def decide(query: str) -> Route:
     if len(query) < 120:
         return Route("easy", "兜底:短", "default")
     return Route("hard", "兜底:长", "default")
+
+
+# ---------------------------------------------------------------- 要不要动手
+
+# 关键词判据：这些说法意味着"光靠资料答不了，得去算/查/跑/抓"。
+# 为什么不交给模型判：这是一次额外推理，而工具判断错了代价很高
+# （该调的时候不调＝瞎编；不该调的时候调＝白烧钱）。规则层 0 成本、可解释、
+# 出错能一眼改；等这套跑稳了再考虑用模型兜住长尾。
+TOOL_HINTS = [
+    (re.compile(r"https?://", re.I), "含链接"),
+    (re.compile(r"算一下|算算|计算|求值|换算"), "要计算"),
+    (re.compile(r"统计|多少条|几条|一共多少|合计|平均"), "要统计"),
+    (re.compile(r"数据库|sql|查一下表|记账表", re.I), "要查库"),
+    (re.compile(r"跑一下|执行|运行一下|写段代码|写个脚本|验证一下"), "要跑代码"),
+    (re.compile(r"查一下|查查|搜一下|检索一下|翻一下文档"), "要查资料"),
+    (re.compile(r"抓一下|抓取|爬一下|打开这个?链接|网页内容"), "要抓网页"),
+]
+
+
+def needs_tools(query: str) -> tuple[bool, str]:
+    """返回 (是否需要工具, 理由)。理由会显示在页面上，方便解释"这轮为什么动了手"。"""
+    text = (query or "").strip()
+    if not text:
+        return False, ""
+    for pattern, reason in TOOL_HINTS:
+        m = pattern.search(text)
+        if m:
+            return True, f"{reason}:{m.group(0)[:12]}"
+    return False, ""

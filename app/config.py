@@ -92,6 +92,26 @@ class Settings:
     # graph.py 导入失败（未装 langgraph）时 server.py 会自动回退
     enable_langgraph: bool = os.getenv("ENABLE_LANGGRAPH", "1") == "1"
 
+    # ---------------- 工具调用 / ReAct（app/tools/, app/react.py）----------------
+    # 为什么要有这一层：路由+缓存+RAG 解决的是"答得省、答得对"，
+    # 但它们都只读预先准备好的资料。真正要"算一下/查库/跑代码/抓网页"时，
+    # 模型必须能动手——这就是 tool calling，也是 Agent 与问答系统的分界线。
+    enable_tools: bool = os.getenv("ENABLE_TOOLS", "1") == "1"
+    # 循环上限。没有它，模型会一直"再确认一下"，token 烧光还可能死循环
+    tool_max_steps: int = int(os.getenv("TOOL_MAX_STEPS", "5"))
+    # 观察结果截断长度：工具返回 200KB HTML 直接塞回 prompt 会一次性吃掉上下文
+    tool_result_chars: int = int(os.getenv("TOOL_RESULT_CHARS", "1600"))
+    tool_timeout: float = float(os.getenv("TOOL_TIMEOUT", "8"))
+    # 单次请求的工具循环预算（人民币）。超了强制收口，避免一条问题烧掉几块钱
+    tool_budget_cny: float = float(os.getenv("TOOL_BUDGET_CNY", "0.05"))
+    # 是否允许执行 run_python 这类"危险级"工具。P3 会换成人工确认（HITL）
+    tool_allow_danger: bool = os.getenv("TOOL_ALLOW_DANGER", "1") == "1"
+    # 抓网页的域名白名单（逗号分隔）。开放抓取等于给 SSRF 开后门
+    tool_fetch_domains: str = os.getenv(
+        "TOOL_FETCH_DOMAINS",
+        "docs.python.org,github.com,raw.githubusercontent.com,pypi.org,example.com")
+    sql_row_limit: int = int(os.getenv("SQL_ROW_LIMIT", "50"))
+
     # 公开演示护栏（app/guard.py）。0 = 不限制，本地开发保持全放开；
     # 部署到公网时必须收紧，否则链接被转发后会把 API 额度刷光。
     demo_quota_per_day: int = int(os.getenv("DEMO_QUOTA_PER_DAY", "0"))

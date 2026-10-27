@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import cache, embedder, guard, memory, rag, store
+from . import cache, embedder, guard, memory, rag, store, tools as toolreg
 from .agent import run
 from .clients import local_breaker
 from .config import settings
@@ -149,6 +149,22 @@ def api_stats(session_id: str | None = None, recent_limit: int = 30) -> dict:
             "quota": ({"limit": settings.demo_quota_per_day,
                        "used": guard.today_used()}
                       if settings.demo_quota_per_day > 0 else None)}
+
+
+@app.get("/api/tools")
+def api_tools() -> dict:
+    """工具清单：Agent 现在会哪些动作、危险级别、循环上限。
+
+    单独一个接口而不是塞进 /api/stats：这份清单是**静态配置**（代码里注册的），
+    和"跑了多少次"不是一类东西；页面用它渲染"能力面板"，不该跟着统计一起变。
+    """
+    return {"enabled": settings.enable_tools,
+            "max_steps": settings.tool_max_steps,
+            "budget_cny": settings.tool_budget_cny,
+            "result_chars": settings.tool_result_chars,
+            "allow_danger": settings.tool_allow_danger,
+            "fetch_domains": [d.strip() for d in settings.tool_fetch_domains.split(",") if d.strip()],
+            "tools": toolreg.describe()}
 
 
 @app.get("/api/cache")

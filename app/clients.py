@@ -185,3 +185,50 @@ def call_cloud(messages: List[dict], max_tokens: int | None = None) -> Tuple[str
         messages,
         max_tokens or settings.cloud_max_tokens,
     )
+
+
+# ---------------------------------------------------------------- 工具调用（function calling）
+
+def chat_tools(
+    messages: List[dict],
+    tools: List[dict],
+    max_tokens: int | None = None,
+    tool_choice: str = "auto",
+) -> Tuple[str, List[dict], int, int]:
+    """带工具的一次对话。返回 (文本, 工具调用列表, 输入token, 输出token)。
+
+    为什么工具调用只能走云端：本地 7B 级模型对 JSON Schema 的遵守度很差，
+    经常吐出 `{"query": "..."}` 之外的自由文本，或者把工具名写成近义词。
+    工具调用的正确性是"要么对要么错"的，不像闲聊可以容错，所以这里不降级到本地——
+    宁可多花一点钱，也不要在演示时出现"调了一个不存在的工具"。
+
+    工具调用列表里每项是 {"id","name","args_raw"}：args_raw 保持原始字符串，
+    解析失败要原样回给模型看（"你给的 JSON 不合法"比"参数错误"有用得多）。
+    """
+    if settings.mock_mode:
+        return ("（mock）工具模式需要真实模型，离线演示不做工具调用。", [], 10, 10)
+    if cloud_client is None:
+        raise ProviderError("未安装 openai 包，无法使用工具调用")
+
+    try:
+        resp = cloud_client.chat.completions.create(
+            model=settings.cloud_model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens or settings.cloud_max_tokens,
+            temperature=0.2,
+        )
+    except Exception as exc:  # 网络/额度/模型不支持 tools，统一交给上层处理
+        raise ProviderError(f"{type(exc).__name__}: {exc}") from exc
+
+    msg = resp.choices[0].message
+    calls = []
+    for tc in (getattr(msg, "tool_calls", None) or []):
+        calls.append({"id": tc.id,
+                      "name": tc.function.name,
+                      "args_raw": tc.function.arguments or "{}"})
+    usage = getattr(resp, "usage", None)
+    tin = getattr(usage, "prompt_tokens", 0) or 0
+    tout = getattr(usage, "completion_tokens", 0) or 0
+    return (msg.content or "").strip(), calls, tin, tout
