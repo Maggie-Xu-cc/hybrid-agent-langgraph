@@ -1,4 +1,4 @@
-"""FastAPI 服务：一个页面 + 两个接口。"""
+"""FastAPI 服务：一个页面 + 一组 REST 接口（聊天/确认/统计/能力/缓存/知识库/会话/记忆等）。"""
 
 from pathlib import Path
 

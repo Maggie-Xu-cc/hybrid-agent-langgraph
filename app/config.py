@@ -60,7 +60,7 @@ class Settings:
     cache_threshold: float = float(os.getenv("CACHE_THRESHOLD", "0"))
     cache_ttl_days: int = int(os.getenv("CACHE_TTL_DAYS", "7"))
     cache_cache_hard: bool = os.getenv("CACHE_CACHE_HARD", "0") == "1"
-    # 载荷守卫（app/cacheguard.py）：向量粗筛之后再比一遍数字/单位/缩写/说法/褒贬。
+    # 载荷守卫（app/cacheguard.py）：向量粗筛之后再比一遍数字/单位/缩写/关键词/说法/褒贬。
     # 不带守卫实测最优阈值 precision 只有 66%，带上后 96%——见 docs/evidence/threshold_sweep.md
     cache_guard: bool = os.getenv("CACHE_GUARD", "1") == "1"
 
@@ -104,7 +104,7 @@ class Settings:
     tool_timeout: float = float(os.getenv("TOOL_TIMEOUT", "8"))
     # 单次请求的工具循环预算（人民币）。超了强制收口，避免一条问题烧掉几块钱
     tool_budget_cny: float = float(os.getenv("TOOL_BUDGET_CNY", "0.05"))
-    # 是否允许执行 run_python 这类"危险级"工具。P3 会换成人工确认（HITL）
+    # 是否允许执行 run_python 这类"危险级"工具。写/危险级的确认闸在 HITL（见 toolgraph.py 的确认卡）
     tool_allow_danger: bool = os.getenv("TOOL_ALLOW_DANGER", "1") == "1"
     # 抓网页的域名白名单（逗号分隔）。开放抓取等于给 SSRF 开后门
     tool_fetch_domains: str = os.getenv(

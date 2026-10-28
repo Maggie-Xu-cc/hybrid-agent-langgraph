@@ -231,7 +231,8 @@ def lookup(query: str, threshold: float | None = None,
     """查缓存，只要结果。返回 {"answer","model","difficulty","score","hits"} 或 None。
 
     两段式：先 hash 精确匹配（O(1)），再相似度线性扫描（量级小，毫秒级）。
-    过期条目（超过 TTL）一律不返回——答案可能已经过时，比如"今天天气"。
+    从未命中过的过期条目（hits=0 且超 TTL）不返回——答案可能已经过时，比如"今天天气"；
+    命中过的条目 updated_at 每次命中都会刷新，正常不会到期。
 
     kb_version：当前知识库版本（rag.version()）。传了就只认同一版本下生成的条目，
     传 None 表示不校验（评测/实验用——它们要的是纯粹的相似度行为）。

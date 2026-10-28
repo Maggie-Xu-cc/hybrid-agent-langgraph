@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from .clients import call_cloud
 
 CRITIC_SYSTEM = """你是审查员。你不重写答案，只做判断。
-检查四件事：
+检查五件事：
 1. 答案里的关键结论是否被【资料】支持；没有依据的断言要指出来。
 2. 有没有和【资料】矛盾的地方（数字、版本、结论）。
 3. 是否答非所问（问 A 答 B，或者回避了问题的核心）。

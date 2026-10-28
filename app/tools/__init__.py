@@ -5,15 +5,15 @@
 1. **参数不能信模型**。模型会漏字段、把数字写成字符串、凭空多塞一个键。
    不校验就直接执行，等于把 JSON 当命令行用。
 2. **工具必须有权限分级**。查资料（read）可以自动跑，
-   执行代码/写文件（danger）必须先过人工确认——这是 P3 要接的 HITL。
+   执行代码/写文件（danger）必须先过人工确认——已接 HITL（app/toolgraph.py 的确认卡）。
 3. **结果必须有上限**。网页 200KB、SQL 一万行，塞回 prompt 会一次性吃光上下文，
    而且模型根本读不完。统一截断，头尾都留，中间标注被砍了多少。
 4. **失败要能被模型看见**。工具报错不要抛到顶层炸掉整轮请求——
    把错误当"观察结果"还给它，它才有机会换个参数重试。
 
-和 MCP 的关系：这里的 ToolSpec 是内部表示，后面 P2 会写一个 MCP server
-把它导出成 MCP 工具（`tools/list` + `tools/call`），这样同一批工具
-能被 Claude Desktop 这类外部客户端装配，而不用改 Agent 代码。
+和 MCP 的关系：这里的 ToolSpec 是内部表示，已由 app/mcp/server.py 导出成
+MCP 工具（`tools/list` + `tools/call`，见 mcp_servers/project_tools.py），
+这样同一批工具能被 Claude Desktop 这类外部客户端装配，而不用改 Agent 代码。
 """
 
 from __future__ import annotations

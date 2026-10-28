@@ -12,7 +12,8 @@ Demo 第一天能跑，第二天接真实问题就崩。逐个说：
 
 1. **什么时候停**：max_steps 兜底；模型不再要求工具就是自然结束；
    还有一条容易漏的——连续几轮"重复调用同一个工具同一个参数"，说明它卡住了，
-   这时候再多给 3 步只会烧钱，直接收口。
+   这时候再多给 3 步只会烧钱，直接收口；
+   最后还有总超时（tool_timeout × max_steps）：不管卡在哪一步，到点强制收口（stop="timeout"）。
 2. **模型胡闹**：参数 JSON 不合法、调不存在的工具、漏必填字段。
    一律**把错误当成观察结果还给它**（"你给的 JSON 不合法，缺少 query 字段"），
    它下一轮通常能自己改对。抛异常终止是最差的选择——用户看到一个红叉，
@@ -119,7 +120,7 @@ class ReactResult:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_cny: float = 0.0
-    stop: str = "answer"          # answer / max_steps / budget / no_progress / error
+    stop: str = "answer"          # answer / max_steps / budget / no_progress / error / timeout
     model: str = ""
 
     def brief_steps(self) -> list[dict]:

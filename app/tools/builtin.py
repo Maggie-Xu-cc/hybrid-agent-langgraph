@@ -75,14 +75,16 @@ _SQL_FORBIDDEN = re.compile(
 _SQL_SCHEMA = """可用表（SQLite，只读）：
 runs(id, ts, query, route, reason, decided_by, model, latency_ms, tokens_in, tokens_out,
      cost_cny, baseline_cost_cny, escalated, session_id, guard_blocked, cache_score,
-     tool_steps)
+     tool_steps, critic_rounds, critic_pass, critic_score, critic_fixes, critic_issues)
      —— 每一次请求的记账。
      · decided_by：取值 cache / rule / model / default；**等于 'cache' 才是语义缓存命中**
      · route：取值 easy / hard，这是"难度判定"，不是"走了哪层"，别用它统计缓存
      · guard_blocked：非空表示这一轮被门卫拦下（拒绝了复用缓存）
+     · critic_*：多智能体审查结果（critic_pass=0 表示未通过；critic_score 0-100 分）
      · cost_cny 实付、baseline_cost_cny 全云端基线；省下的钱 = baseline - cost
-semantic_cache(id, query, answer, model, hits, cost_cny, kb_version)
-     —— 语义缓存的条目（hits 是被复用的次数）
+semantic_cache(query_hash, query_text, answer, model, difficulty, hits, cost_cny,
+               kb_version, tokens_in, tokens_out, created_at, updated_at)
+     —— 语义缓存的条目，主键是 query_hash（没有 id 列；hits 是被复用的次数）
 kb_chunks(id, doc, heading, chunk_no, text, n_chars)
      —— 知识库切块"""
 

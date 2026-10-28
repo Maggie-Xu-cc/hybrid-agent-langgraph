@@ -20,14 +20,15 @@
 - checkpointer 按 session_id 持久化会话状态，天然支持多轮对话；
 - 上下文工程（阶段二）：按 token 预算组装 prompt，长期记忆注入、历史摘要压缩。
 
-图的结构（阶段二后）：
+图的结构（v4.0 现状，13 个节点）：
 
     START ─▶ load_memory ─▶ cache_lookup ─命中─▶ bookkeep ─▶ save_memory ─▶ END
                                  │
-                                 └未命中─▶ route ──easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
-                                              │                                │                         │
-                                              └──hard──▶ cloud_answer          └─通过─▶ bookkeep ◀───────┘
-                                                         (cloud_answer ─────────────────▶ bookkeep)
+                                 └未命中─▶ retrieve ─▶ route ─┬─easy──▶ local_answer ─▶ self_check ─需升级─▶ escalate ─┐
+                                                              │                            └─通过────────────────────▶ review
+                                                              ├─hard──▶ cloud_answer ─────────────────────────────▶ review
+                                                              └─tools─▶ tool_agent ──────────────────────────────▶ review
+    review ─未过且未到返工上限─▶ revise ─▶ review ─通过/到上限─▶ bookkeep
 
 语义缓存（阶段三）在路由之前：相似问题直接复用答案，成本降为 0。
 """
@@ -117,7 +118,7 @@ class AgentState(TypedDict, total=False):
     tools_reason: str  # 为什么判定要用工具（页面上要能解释）
     tool_steps: list  # 工具调用轨迹（给页面和记账用）
     tool_calls: int  # 实际执行了几次工具（不含重复调用）
-    tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error/cancelled
+    tool_stop: str  # 循环怎么结束的：answer/max_steps/budget/no_progress/error/cancelled/timeout
     tool_waited_ms: int  # 等用户点"同意"的时间：要从延迟里扣掉，那不是系统慢
     # ---- 多智能体审查（app/critic.py）----
     critic_rounds: int  # 审了几轮（含返工后再审）
@@ -167,7 +168,7 @@ def cache_lookup_node(state: AgentState) -> dict:
 
     命中时直接构造 answer/route 等字段，条件边把流程引向 bookkeep——
     bookkeep 仍走原路径构造 result，保证缓存命中的返回结构与普通请求完全一致。
-    查找成本 ≈ 一次 256 维向量线性扫描，毫秒级，0 token。
+    查找成本 ≈ 一次向量线性扫描（维度随后端：ngram 256 / bge 512），毫秒级，0 token。
 
     传 kb_version 是为了让"答案依赖文档"这个前提可校验：知识库没变就照样复用，
     重建过索引就自动失效。原来的做法是一律不缓存检索过的答案，结果缓存几乎不工作。

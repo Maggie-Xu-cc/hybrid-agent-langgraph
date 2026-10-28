@@ -32,7 +32,8 @@
 
 为什么不用真正的向量库（sqlite-vec / Chroma）：
    和缓存模块同一个判断——几千个 chunk 的线性扫描是毫秒级，不值得引入依赖。
-   embed() 是独立函数，将来换 BGE 之类的真 embedding 模型只改它一处，上层不动。
+   embed() 是独立函数：embedding 后端（ngram / bge）已由 app/embedder.py 统一支持，
+   换后端只改它一处，上层不动。
    这个决定的边界也很清楚：文档量到十万级、或要毫秒级响应，就该换向量库了。
 """
 
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     chunk_no   INTEGER NOT NULL DEFAULT 0,
     text       TEXT NOT NULL,
     n_chars    INTEGER NOT NULL,
-    embedding  TEXT NOT NULL,          -- JSON 数组，256 维
+    embedding  TEXT NOT NULL,          -- JSON 数组，维度随后端（ngram 256 / bge 512）
     updated_at TEXT NOT NULL,
     UNIQUE(doc, chunk_no)
 );
@@ -328,8 +329,9 @@ def search(query: str, top_k: int | None = None,
 
     所以改成身份明确的加权：BM25 归一化后占 85%，向量只占 15%。
     向量的作用退化为"BM25 打出平手时，谁字面更像就选谁"。
-    —— 这不是最优解，是当前特征下的诚实解。换成真 embedding 模型后
-    （embed() 换实现即可），向量才有资格拿到更高权重，那时再调这个比例。
+    —— 这不是最优解，是当前特征下的诚实解。bge 这类真 embedding 后端
+    已在 embedder.py 落地（缓存侧已用上），等 RAG 侧标定出可靠的相关性
+    区分度后，向量才有资格拿到更高权重，那时再调这个比例。
 
     过滤用 BM25 绝对值（min_score 参数在这里实际指 BM25 门槛），
     因为它是本模块唯一有跨查询可比性的量纲。向量低但 BM25 强 → 照样入选，

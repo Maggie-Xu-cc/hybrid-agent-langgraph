@@ -8,11 +8,11 @@
 
 拆完之后，图长这样：
 
-    START ─▶ think ──有工具调用──▶ act ──继续──▶ think
-               │                    │
-               │有答案               │到上限/打转
-               ▼                    ▼
-             finish ◀──────────── finalize
+    START ─▶ think ──有工具调用──▶ act ─┬─继续──▶ think
+               │                        ├─到上限/打转──▶ finalize ─▶ finish
+               │有答案                  └─用户取消──▶ finish
+               ▼
+             finish
                │
                ▼
               END
