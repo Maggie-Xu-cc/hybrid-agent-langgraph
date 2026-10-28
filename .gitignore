@@ -29,3 +29,8 @@ models/
 .live*.png
 .live_sid
 .tmpdiag/
+
+# 个人学习材料（本地保留，不入库）
+docs/learning-log.md
+docs/learning-path.md
+docs/figures/
