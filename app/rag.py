@@ -171,6 +171,29 @@ def index_file(path: Path, root: Path) -> int:
     return len(chunks)
 
 
+# 哪些 markdown 不该进知识库：
+#   evidence/   —— 评测脚本自动生成的原始数据，检索命中它只会把数字当结论背出来；
+#   figures/    —— 图目录，里面就算有说明文件也不该被当成文档；
+#   learning-*  —— 学习笔记。那是"人对项目说的话"，不是项目文档；混进来之后
+#                  search_docs 会把"我今天学到什么"当成项目交付物引用出去。
+KB_SKIP_DIRS = ("evidence", "figures")
+KB_SKIP_NAME_PREFIX = ("learning-",)
+
+
+def should_index(p: Path, root: Path | None = None) -> bool:
+    """这个 md 该不该进知识库。
+
+    索引和"启动时判断索引完不完整"必须用同一个口径——两边算法不一样，
+    篇数就永远对不上，服务每次启动都会白重建一遍（本地踩过）。
+
+    只拿**相对路径**的目录部分做判断：项目本身要是放在 /data/evidence/ 这类
+    路径下，用绝对路径判断会把整个知识库误排除。
+    """
+    rel = p.relative_to(root) if root else p
+    return (not any(part in KB_SKIP_DIRS for part in rel.parts[:-1])
+            and not p.name.startswith(KB_SKIP_NAME_PREFIX))
+
+
 def index_dirs(dirs: list[str] | None = None, root: Path | None = None) -> dict:
     """索引若干目录下的 .md 文件。返回 {docs, chunks, skipped}。"""
     root = root or Path.cwd()
@@ -185,7 +208,7 @@ def index_dirs(dirs: list[str] | None = None, root: Path | None = None) -> dict:
             skipped.append(f"{d}(目录不存在)")
             continue
         for p in sorted(folder.rglob("*.md")):
-            if "evidence" in p.parts:      # 自动生成的日志类文档不进知识库
+            if not should_index(p, root):  # 评测原始数据、学习笔记不进知识库
                 continue
             n = index_file(p, root)
             if n:
@@ -420,6 +443,41 @@ def stats() -> dict:
         return {"docs": 0, "chunks": 0, "chars": 0, "updated_at": ""}
     return {"docs": row["d"], "chunks": row["n"],
             "chars": row["chars"], "updated_at": row["ts"] or ""}
+
+
+def stale(dirs: list[str] | None = None, root: Path | None = None) -> bool:
+    """磁盘上的文档比索引新吗（按修改时间比）。
+
+    为什么需要这个判断：启动时只比"篇数"测不出内容变化——文档改一段、篇数还是 4，
+    索引就一直是旧的。线上实际发生过：10-27 建的索引里是 58k 字，文档后来写到 78k 字，
+    检索永远命中旧快照，答案引用的段落可能早就删了。篇数对、块数对、只有内容变了，
+    这是最难发现的一种"索引假健康"。
+    """
+    root = root or Path.cwd()
+    dirs = dirs if dirs is not None else [
+        d.strip() for d in settings.kb_dirs.split(",") if d.strip()]
+    newest = 0.0
+    for d in dirs:
+        folder = root / d
+        if not folder.exists():
+            continue
+        for p in folder.rglob("*.md"):
+            if should_index(p, root):
+                try:
+                    newest = max(newest, p.stat().st_mtime)
+                except OSError:
+                    continue
+    if not newest:
+        return False
+    ts = stats().get("updated_at") or ""
+    if not ts:
+        return True
+    try:
+        indexed = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return True
+    # 1 秒容差：索引写入和文件落盘可能在同一秒内，不该判成过期
+    return newest > indexed + 1
 
 
 # ---------------- 知识库版本（缓存复用要用） ----------------

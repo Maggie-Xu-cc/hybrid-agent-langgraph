@@ -78,13 +78,19 @@ def _ensure_kb() -> None:
         for d in dirs:
             folder = Path.cwd() / d
             if folder.exists():
-                expect += sum(1 for p in folder.rglob("*.md") if "evidence" not in p.parts)
+                # 用索引模块自己的口径数，而不是从外面再写一遍"哪些不算"。
+                # 两处口径一旦漂移，篇数永远对不上，每次启动都会白重建一遍索引。
+                expect += sum(1 for p in folder.rglob("*.md")
+                              if rag.should_index(p, Path.cwd()))
 
-        if st["chunks"] > 0 and st["docs"] == expect:
+        if (st["chunks"] > 0 and st["docs"] == expect
+                and not rag.stale(dirs, Path.cwd())):
             print(f"[kb] 已有索引：{st['docs']} 篇 / {st['chunks']} 块", flush=True)
             return
         if st["chunks"] > 0:
-            print(f"[kb] 索引不完整（{st['docs']}/{expect} 篇），重建", flush=True)
+            # 篇数不对 or 文档比索引新，都要重建。只比篇数会漏掉"内容改了但篇数没变"
+            print(f"[kb] 索引需要重建（库里 {st['docs']}/{expect} 篇，"
+                  f"或文档比索引新）", flush=True)
         r = rag.index_dirs(dirs, Path.cwd())
         print(f"[kb] 已建索引：{r['docs']} 篇 / {r['chunks']} 块"
               f"（目录 {dirs}）", flush=True)

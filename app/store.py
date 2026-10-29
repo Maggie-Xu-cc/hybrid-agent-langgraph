@@ -7,6 +7,14 @@ import time
 from .config import settings
 from .dbutil import connect, with_retry
 
+# 一条请求的真实耗时不可能超过一小时：工具循环有总超时（8s × 最多 5 步），
+# 单次模型调用有 60s 超时，量级是"分钟"，不是"天"。
+# 超过它的只可能是时间源本身失效——实测过一次：perf_counter 的基准在同一台
+# 机器的不同进程之间并不通用，服务在 interrupt 处存盘、换进程恢复之后，
+# 两个单调钟相减记出了一条 51 亿毫秒（约 60 天）的记录，把平均延迟整个带偏。
+# 这个阈值只用来判断"这一行能不能进平均"，不改写原始账目——记账要如实。
+MAX_PLAUSIBLE_LATENCY_MS = 60 * 60 * 1000
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,   -- 自增主键，一条请求一行
@@ -140,7 +148,13 @@ def stats() -> dict:
         row = conn.execute(
             "SELECT COUNT(*) n, COALESCE(SUM(cost_cny),0) cost,"
             " COALESCE(SUM(baseline_cost_cny),0) base,"
-            " COALESCE(AVG(latency_ms),0) lat,"
+            # 只拿"像真延迟"的行算平均。历史脏值（perf_counter 跨进程失效那条）
+            # 不能删——账是真的，只是那一行的时间源错了——所以单独报个数让人看见，
+            # 而不是悄悄把它从分母里拿掉。
+            f" COALESCE(AVG(CASE WHEN latency_ms BETWEEN 0 AND {MAX_PLAUSIBLE_LATENCY_MS}"
+            " THEN latency_ms END),0) lat,"
+            f" COALESCE(SUM(CASE WHEN latency_ms > {MAX_PLAUSIBLE_LATENCY_MS}"
+            " THEN 1 ELSE 0 END),0) lat_bad,"
             " COALESCE(SUM(escalated),0) esc,"
             # 门卫拦截次数：不是失败，是拦下了"字面很像但参数不同"的复用
             " COALESCE(SUM(CASE WHEN guard_blocked != '' THEN 1 ELSE 0 END),0) guarded"
@@ -172,7 +186,9 @@ def stats() -> dict:
             " FROM runs"
         ).fetchone()
         by_layer_raw = conn.execute(
-            "SELECT decided_by layer, COUNT(*) n, COALESCE(AVG(latency_ms),0) lat,"
+            "SELECT decided_by layer, COUNT(*) n,"
+            f" COALESCE(AVG(CASE WHEN latency_ms BETWEEN 0 AND {MAX_PLAUSIBLE_LATENCY_MS}"
+            " THEN latency_ms END),0) lat,"
             " COALESCE(SUM(cost_cny),0) cost FROM runs GROUP BY decided_by"
         ).fetchall()
 
@@ -194,6 +210,7 @@ def stats() -> dict:
         "baseline_cost_cny": round(base, 4),
         "saved_ratio": round(saved, 4),
         "avg_latency_ms": int(row["lat"] or 0),
+        "latency_outliers": int(row["lat_bad"] or 0),
         "escalated": int(row["esc"] or 0),
         "easy": by_route.get("easy", 0),
         "hard": by_route.get("hard", 0),
@@ -234,5 +251,11 @@ def recent(limit: int = 10, session_id: str | None = None) -> list[dict]:
             d["tool_steps"] = json.loads(d.get("tool_steps") or "[]")
         except (json.JSONDecodeError, TypeError):
             d["tool_steps"] = []
+        # 单条延迟也可能是历史脏值：原样吐给页面会显示成"5173251932 毫秒"，
+        # 用户只会以为页面坏了。这里置 0 并打标，页面照常显示，
+        # 要追查时看 latency_anomaly 这一位，原始值仍在库里。
+        if (d.get("latency_ms") or 0) > MAX_PLAUSIBLE_LATENCY_MS:
+            d["latency_anomaly"] = True
+            d["latency_ms"] = 0
         out.append(d)
     return out

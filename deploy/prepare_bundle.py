@@ -69,7 +69,9 @@ PUBLIC_ENV = {
 # 这些是本地开发产物，不能带上云
 IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", "*.db", "*.db-wal", "*.db-shm", "*.log",
-    "evidence",   # 实验日志，几个 MB，线上不需要
+    "evidence",      # 实验日志，几个 MB，线上不需要
+    "figures",       # 教学用 SVG，线上不需要（知识库也不索引它）
+    "learning-*.md",  # 个人学习笔记：不进知识库，更不该被传到公网上
 )
 
 
@@ -167,6 +169,12 @@ def main() -> int:
         print(f"✗ 部署包里混进了数据库文件：{leaked}")
         return 1
     print("✓ 自查通过：无本地数据库文件")
+
+    # 自查：学习笔记是个人材料，不进知识库，也不该出现在公网部署包里
+    leaked_notes = [p.name for p in OUT.rglob("learning-*.md")]
+    if leaked_notes:
+        print(f"✗ 部署包里混进了学习笔记：{leaked_notes}")
+        return 1
     return 0
 
 

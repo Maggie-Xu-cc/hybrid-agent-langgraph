@@ -96,6 +96,19 @@ print("\n== 4-6. 检索质量（索引 docs/）==")
 r = rag.index_dirs(["docs"], ROOT)
 check("索引成功", r["chunks"] > 0, f"{r['docs']} 篇 / {r['chunks']} 块")
 
+# 索引口径：哪些 md 不该进知识库。
+# 这不是"多几块"的问题——混进来之后 search_docs 会把"我今天学到什么"
+# 当成项目文档引用出去，答案里就会出现学习笔记的口吻。
+with rag.connect(settings.db_path) as conn:
+    indexed_docs = {row["doc"] for row in conn.execute(
+        "SELECT DISTINCT doc FROM kb_chunks")}
+check("学习笔记（learning-*）不进知识库",
+      not any("learning-" in d for d in indexed_docs), f"{sorted(indexed_docs)}")
+check("评测原始数据（evidence/）不进知识库",
+      not any("/evidence/" in d for d in indexed_docs))
+check("正式文档都在", "docs/code-reading.md" in indexed_docs)
+check("刚建完索引不算过期", rag.stale(["docs"], ROOT) is False)
+
 REL = [
     # 断言用"内容里有没有这个词"，不用具体章节号：
     # 文档一改（比如新写了一节复述同样的例子），章节号就变了，检索结果其实是对的，

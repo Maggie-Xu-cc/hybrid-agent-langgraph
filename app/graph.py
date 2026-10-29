@@ -129,7 +129,11 @@ class AgentState(TypedDict, total=False):
     critic_fixes: int  # 返工了几次
     critic_by: str  # 谁判的：rule（数字核对）/llm/error（审查员自己挂了，放行）/skip
     critic_skipped: bool  # 这一轮没审（开关关着，或缓存命中）
-    started: float
+    started: float  # 旧的单调钟起点：端到端延迟已改用 started_wall，这个只为兼容旧 checkpoint 留着
+    # 墙钟起点：端到端延迟用它算。为什么不能只用上面那个——状态会在 interrupt
+    # （等用户确认）处落盘，恢复时可能已经是另一个进程甚至另一台机器，
+    # 两边的 perf_counter 基准没有任何关系，相减会得到天文数字（线上出过 60 天）。
+    started_wall: float
     result: dict
 
 
@@ -200,6 +204,7 @@ def cache_lookup_node(state: AgentState) -> dict:
         "cache_blocked_text": "",
         "cache_top_score": hit["score"],
         "started": time.perf_counter(),  # 命中路径不经过 route，这里补上计时起点
+        "started_wall": time.time(),
         "answer": hit["answer"],
         "model_used": f"{hit['model']} (cache)",
         "route": {
@@ -264,6 +269,7 @@ def retrieve_node(state: AgentState) -> dict:
 def route_node(state: AgentState) -> dict:
     """路由节点：原来的 agent.run() 第一步。路由 token 记在本地账上。"""
     started = time.perf_counter()
+    started_wall = time.time()
     query = state["query"].strip()
 
     route: Route = decide(query)
@@ -279,6 +285,7 @@ def route_node(state: AgentState) -> dict:
     return {
         "query": query,
         "started": started,
+        "started_wall": started_wall,
         "route": {
             "difficulty": route.difficulty,
             "reason": route.reason,
@@ -541,6 +548,37 @@ def revise_node(state: AgentState) -> dict:
     }
 
 
+def _elapsed_ms(state: AgentState, waited_ms: int | None = None) -> int:
+    """端到端耗时（毫秒）：墙钟差 − 等人确认的时间，越界归零。
+
+    为什么不用 perf_counter：这张图的中间状态会在 interrupt（等用户点确认）处
+    落盘，恢复时可能已经是另一个进程、甚至平台换了一台机器重建的容器。
+    两个进程的单调钟基准毫无关系，相减能得出"这条请求跑了 60 天"——
+    线上真的记出过 51 亿毫秒，一条就把平均延迟拉成了天文数字。
+    墙钟（time.time）跨进程、跨机器都对得上，代价是受 NTP 校时影响（毫秒级，记账够用）。
+
+    为什么不直接 max(0, ...)：等待时间扣完可能变负（起点在未来 / 时钟被往回拨），
+    这时说明数据本身不可信，记 0 而不是记一个"看起来很小"的假数。
+
+    等人点"同意"的那几十秒不是系统慢：不扣掉的话，页面上会出现"这一轮跑了 42 秒"，
+    而真实原因是用户自己在犹豫——这种数字会误导所有性能结论。
+    """
+    started_wall = float(state.get("started_wall") or 0)
+    if not started_wall:
+        # 旧 checkpoint 里没有这个字段（升级前挂起的会话）：不猜，记 0。
+        return 0
+    # 不传就自己从状态里取。默认 0 的写法看着方便，实际是个坑：
+    # 调用方漏传一次，等待时间就白扣了，而账面上完全看不出来。
+    if waited_ms is None:
+        waited_ms = int(state.get("tool_waited_ms") or 0)
+    elapsed = int((time.time() - started_wall) * 1000) - int(waited_ms or 0)
+    if elapsed > store.MAX_PLAUSIBLE_LATENCY_MS:
+        print(f"[bookkeep] 延迟异常已归零：elapsed={elapsed}ms waited={waited_ms}ms "
+              f"started_wall={started_wall:.0f}", flush=True)
+        return 0
+    return max(0, elapsed)
+
+
 def bookkeep_node(state: AgentState) -> dict:
     """记账节点：成本计算 + 历史摘要压缩 + 落库 + 更新 history。"""
     route = state["route"]
@@ -599,10 +637,8 @@ def bookkeep_node(state: AgentState) -> dict:
 
     tokens_in = local_in + cloud_in
     tokens_out = local_out + cloud_out
-    # 等人点"同意"的那几十秒不是系统慢。不扣掉的话，页面上会出现
-    # "这一轮跑了 42 秒"——而真实原因是用户自己在犹豫，这种数字会误导所有性能结论。
     waited_ms = int(state.get("tool_waited_ms") or 0)
-    latency_ms = max(0, int((time.perf_counter() - state["started"]) * 1000) - waited_ms)
+    latency_ms = _elapsed_ms(state, waited_ms)
 
     cost = (
         (local_in + local_out) / 1000 * settings.price_local_per_1k
